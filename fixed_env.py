@@ -491,7 +491,7 @@ if __name__ == "__main__":
         world_bounds=world_bounds,
         friction=1,
         num_obstacles=1,
-        given_obstacles= [(0, 0.48), (0, 0.52), (0.6, 0.48), (0.6, 0.52)])
+        given_obstacles = [(0, 0.48), (0, 0.52), (0.6, 0.48), (0.6, 0.52)])
 
     # Check the environment
     plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=1.0)

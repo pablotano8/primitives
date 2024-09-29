@@ -1,22 +1,12 @@
-import pymunk
+
 import numpy as np
 import matplotlib.pyplot as plt
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import random
-import pickle
 
-
-import matplotlib.patches as patches
-from matplotlib.collections import PatchCollection
-
-
-from continuous_nav_envs import World,TrackWorld
 from dmps import DMP1D, Simulation
 
-from continuous_nav_envs import World,TrackWorld, generate_random_positions, is_inside_obstacle
+from continuous_nav_envs import generate_random_positions, is_inside_obstacle
 
 
 

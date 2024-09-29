@@ -10,7 +10,7 @@ import copy
 from plot_trajectories import plot_example_trajectories, plot_predicted_vs_actual_trajectories
 import matplotlib.pyplot as plt
 from utils import sample_random_dmp_params, generate_trajectories_from_dmp_params, plot_value_function
-from continuous_nav_envs import World,TrackWorld, generate_random_positions, is_inside_obstacle
+from continuous_nav_envs import World, generate_random_positions
 from dmps import DMP1D,Simulation
 from plot_trajectories import generate_and_plot_trajectories_from_parameters
 class GoalNet(nn.Module):
@@ -105,9 +105,6 @@ def generate_data(
         # Initialize the first DMPs
         dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=3, complexity=complexity)
         dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=3, complexity=complexity)
-
-        # Initialize the position and velocity of the agent
-        start_velocity = np.array([0.0, 0.0])
 
         # Initialize the simulation with the world and the first DMPs
         simulation = Simulation(world, dmp_x1, dmp_y1, start_position, T=1.0, dt=0.01)
@@ -569,10 +566,11 @@ if __name__ == "__main__":
         complexity=0.5,
         random_holes=True)
 
+
     # Collect States for MP (only random world)
     world = World( world_bounds=world_bounds,friction=0,given_centers = [(0.25, 0.25),(0.6, 0.6)])
     plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=1.0)
-    train_data_mp,valid_data_mp = generate_data(world,world_bounds,number_of_trajectories=20000,random_world=False)
+    train_data_mp,valid_data_mp = generate_data(world,world_bounds,number_of_trajectories=500,random_world=False)
     # train_data_mp,valid_data_mp = generate_initial_states(world,world_bounds,number_of_states=100000)
 
     # Value network for RL

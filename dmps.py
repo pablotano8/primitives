@@ -14,7 +14,7 @@ from matplotlib.collections import PatchCollection
 
 
 class DMP1D:
-    def __init__(self, start, goal, n_basis=6, alpha_x=3.0, alpha_z=10.0, beta_z=10.0/4.0, complexity = 1):
+    def __init__(self, start, goal, n_basis=3, alpha_x=3.0, alpha_z=10.0, beta_z=10.0/4.0, complexity = 1):
         self.start = start
         self.goal = goal
         self.n_basis = n_basis
