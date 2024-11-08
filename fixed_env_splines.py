@@ -7,12 +7,11 @@ import torch.optim as optim
 import random
 import pickle
 import copy
-from plot_trajectories import plot_example_trajectories, plot_predicted_vs_actual_trajectories
 import matplotlib.pyplot as plt
-from utils import  generate_trajectories_from_dmp_params
 from continuous_nav_envs import World, generate_random_positions
-from dmps import DMP1D,Simulation
-from plot_trajectories import generate_and_plot_trajectories_from_parameters
+from splines import Spline,Spline1D,Simulation, generate_trajectories_from_dmp_params, plot_example_trajectories, generate_and_plot_trajectories_from_parameters, plot_predicted_vs_actual_trajectories
+
+
 class GoalNet(nn.Module):
 
     def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.3):
@@ -62,36 +61,31 @@ def generate_data(
         # Generate random start and goal positions for first DMP
         start_position, _ = generate_random_positions(world, world_bounds=world_bounds,orientation = None)
         _, goal_position1 = generate_random_positions(world, world_bounds=world_bounds,orientation = None)
+        curvature1 = np.random.uniform(low=-complexity,high=complexity)
 
-        # Initialize the first DMPs
-        dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=3, complexity=complexity)
-        dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=3, complexity=complexity)
-
-        # Initialize the position and velocity of the agent
-        start_velocity = np.array([0.0, 0.0])
-
-        # Initialize the simulation with the world and the first DMPs
-        simulation = Simulation(world, dmp_x1, dmp_y1, start_position, T=1.0, dt=0.01)
-
-        # Run the first simulation and record the positions
-        positions1, velocities1, collision1, _, _ = simulation.run()
+        spline1 = Spline(start_position, goal_position1, curvature1)
+        # Create Spline1D instances for x and y dimensions
+        dmp_x1 = Spline1D(spline1, dim=0)
+        dmp_y1 = Spline1D(spline1, dim=1)
+        # Now use these in your Simulation class
+        simulation = Simulation(world, dmp_x1, dmp_y1, start_position)
+        positions1, velocities1, collision1, collision_pos1, min_distance1 = simulation.run()
 
         # Generate random goal position for second DMP
         _, goal_position2 = generate_random_positions(world, world_bounds=world_bounds,orientation = None)
+        curvature2 = np.random.uniform(low=-complexity,high=complexity)
 
-        # Initialize the second DMPs with start position as the final position from the first DMP
-        dmp_x2 = DMP1D(start=positions1[-1][0], goal=goal_position2[0], n_basis=3,complexity=complexity)
-        dmp_y2 = DMP1D(start=positions1[-1][1], goal=goal_position2[1], n_basis=3,complexity=complexity)
-
-        # Initialize the simulation with the world and the second DMPs
-        simulation = Simulation(world, dmp_x2, dmp_y2, positions1[-1], T=1.0, dt=0.01)
-
-        # Run the second simulation and record the positions
-        positions2, velocities2, collision2,_ ,_= simulation.run()
+        spline2 = Spline(positions1[-1], goal_position2, curvature2)
+        # Create Spline1D instances for x and y dimensions
+        dmp_x2 = Spline1D(spline2, dim=0)
+        dmp_y2 = Spline1D(spline2, dim=1)
+        # Now use these in your Simulation class
+        simulation = Simulation(world, dmp_x2, dmp_y2, start_position)
+        positions2, velocities2, collision2, collision_pos2, min_distance2 = simulation.run()
 
         # Add the data to the training set
-        dmp_params1 = [dmp_x1.start, dmp_y1.start, dmp_x1.goal, dmp_y1.goal, *dmp_x1.weights, *dmp_y1.weights]
-        dmp_params2 = [dmp_x1.goal, dmp_y1.goal, dmp_x2.goal, dmp_y2.goal, *dmp_x2.weights, *dmp_y2.weights]
+        dmp_params1 = [dmp_x1.start, dmp_y1.start,dmp_x1.goal, dmp_y1.goal, spline1.curvature]
+        dmp_params2 = [dmp_x2.start, dmp_y2.start,dmp_x2.goal, dmp_y2.goal, spline2.curvature]
 
         s_t = positions1[0]
         data.append((s_t, True, positions1[-1], positions2[-1], dmp_params1, dmp_params2, any(collision1)*1, any(collision2)*1))
@@ -224,8 +218,8 @@ def train_predictive_net(train_data,
                     loss_coll2 = criterion2(pred_coll2, batch_coll2)
                     loss_pos = (loss_pos1 + loss_pos2) / 2  # Average the losses for validation
                     loss_coll = (loss_coll1 + loss_coll2) / 2
-                    dumb_error1.append(torch.mean(torch.abs(batch_final_position1- batch_dmp_params1[:,2:4])))
-                    dumb_error2.append(torch.mean(torch.abs(batch_final_position2- batch_dmp_params2[:,2:4])))
+                    dumb_error1.append(torch.mean(torch.abs(batch_final_position1- batch_dmp_params1[:,:2])))
+                    dumb_error2.append(torch.mean(torch.abs(batch_final_position2- batch_dmp_params2[:,:2])))
                     valid_losses_pos1.append(loss_pos1.item())
                     valid_losses_pos2.append(loss_pos2.item())
                     valid_losses_coll.append(loss_coll.item())
@@ -339,8 +333,8 @@ def train(train_data,
                 outside_square2 = (penalty_x2 + penalty_y2).mean()
 
                 if task == "reach_final_goal":
-                    loss_goal = 0.5*loss_goal1 + loss_goal2 + 0.25*  (loss_coll1 + loss_coll2) + outside_square1 + outside_square2
-                    # loss_goal = loss_goal1 + loss_goal2
+                    # loss_goal = 0.5*loss_goal1 + loss_goal2 + 0.25*  (loss_coll1 + loss_coll2) + outside_square1 + outside_square2
+                    loss_goal = loss_goal2
                 elif task == "reach_two_goals":
                     target_goal_batch1 = torch.stack([torch.tensor(target_goal1) for _ in batch])
                     target_goal_batch2 = torch.stack([torch.tensor(target_goal2) for _ in batch])
@@ -480,7 +474,6 @@ def train(train_data,
 
 
 
-
 if __name__ == "__main__":
 
     # Initialize the world
@@ -492,17 +485,17 @@ if __name__ == "__main__":
         given_obstacles = [(0, 0.48), (0, 0.52), (0.6, 0.48), (0.6, 0.52)])
 
     # Check the environment
-    plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=1.0)
+    plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=0.1)
 
     # Collect Data for Predictive Net
     train_data,valid_data= generate_data(
         world,
         world_bounds,
-        number_of_trajectories=5_000,
-        complexity=1.0)
+        number_of_trajectories=10_000,
+        complexity=0.1)
 
     # Initialize the network Level 1
-    net = PredNet(input_size=2+2+2+6, hidden_size=64, output_size=3, dropout_rate=0.1)
+    net = PredNet(input_size=2+5, hidden_size=64, output_size=3, dropout_rate=0.1)
 
     # Train Predictive Net
     loss1,loss2, net = train_predictive_net(
@@ -520,15 +513,14 @@ if __name__ == "__main__":
     plt.plot(np.linspace(0,1500,len(loss2)),1-np.array(loss2),color='red',linewidth=3)
     plt.ylim(0.8,1.0)
     plt.show()
-
     
+
     plot_predicted_vs_actual_trajectories(
         world,
         net,
         world_bounds,
-        number_of_trajectories=4,
-        circular=False,
-        complexity=0.5)
+        number_of_trajectories=3,
+        complexity=0.1)
     
 
     valid_loss_task = {'reach_final_goal':[]  }
@@ -536,7 +528,7 @@ if __name__ == "__main__":
     # Train New Tasks
     all_valid_loss = []
     for task in valid_loss_task:
-        net_goal = GoalNet(input_size=2, hidden_size=64, output_size=2+2+6, dropout_rate=0.1)
+        net_goal = GoalNet(input_size=2, hidden_size=64, output_size=5, dropout_rate=0.1)
         net_preds = [copy.deepcopy(net), copy.deepcopy(net)]
         target_goal1 = [0.3,0.85]
         target_goal2 = [0.3,0.85]
@@ -549,7 +541,7 @@ if __name__ == "__main__":
             target_goal1 = target_goal1,
             target_goal2 = target_goal2,
             task = task,
-            bound_dmp_weights=0.9,
+            bound_dmp_weights=0.01,
             early_stopping_threshold = 0.99,
             eval_freq=5,
             learning_rate=0.001,

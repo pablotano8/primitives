@@ -7,7 +7,7 @@ import torch
 from dmps import DMP1D, Simulation
 
 from continuous_nav_envs import generate_random_positions, is_inside_obstacle
-
+from mpl_toolkits.mplot3d import Axes3D
 
 
 def plot_example_trajectories_reach_goal(world, world_bounds, number_of_trajectories=10, use_two_prims = False,random_position=True, orientation=None, complexity=1, tolerance=0.05):
@@ -186,7 +186,8 @@ def plot_predicted_vs_actual_trajectories(
     plt.show()
 
 
-def plot_example_trajectories(world, world_bounds, number_of_trajectories=1, random_position=True, orientation=None, complexity=1, circular=False):
+def plot_example_trajectories(
+        world, world_bounds, number_of_trajectories=1, random_position=True, orientation=None, complexity=1, circular=False,n_basis=3):
     def generate_positions():
         if circular:
             while True:
@@ -220,8 +221,8 @@ def plot_example_trajectories(world, world_bounds, number_of_trajectories=1, ran
             start_position, goal_position = generate_random_positions(world, world_bounds=world_bounds, orientation=orientation)
         
         # Initialize the DMPs
-        dmp_x = DMP1D(start=start_position[0], goal=goal_position[0], n_basis=2, complexity=complexity)
-        dmp_y = DMP1D(start=start_position[1], goal=goal_position[1], n_basis=2, complexity=complexity)
+        dmp_x = DMP1D(start=start_position[0], goal=goal_position[0], n_basis=n_basis, complexity=complexity)
+        dmp_y = DMP1D(start=start_position[1], goal=goal_position[1], n_basis=n_basis, complexity=complexity)
         # Initialize the position and velocity of the agent
         start_velocity = np.array([0.0, 0.0])
 
@@ -237,8 +238,8 @@ def plot_example_trajectories(world, world_bounds, number_of_trajectories=1, ran
         _, goal_position2 = generate_random_positions(world, world_bounds=world_bounds,orientation = orientation)
 
         # Initialize the second DMPs with start position as the final position from the first DMP
-        dmp_x2 = DMP1D(start=positions[-1][0], goal=goal_position2[0], n_basis=3,complexity=complexity)
-        dmp_y2 = DMP1D(start=positions[-1][1], goal=goal_position2[1], n_basis=3,complexity=complexity)
+        dmp_x2 = DMP1D(start=positions[-1][0], goal=goal_position2[0], n_basis=n_basis,complexity=complexity)
+        dmp_y2 = DMP1D(start=positions[-1][1], goal=goal_position2[1], n_basis=n_basis,complexity=complexity)
 
         # Initialize the simulation with the world and the second DMPs
         simulation = Simulation(world, dmp_x2, dmp_y2, positions[-1], T=1.0, dt=0.01)
@@ -250,12 +251,27 @@ def plot_example_trajectories(world, world_bounds, number_of_trajectories=1, ran
     plt.show()
 
 
-def generate_and_plot_trajectories_from_parameters(dmp_params1, dmp_params2, batch_size, batch_s_t, world,world_bounds,n_basis=3,circular=False,plot_only_first=False):
+def generate_and_plot_trajectories_from_parameters(
+        dmp_params1,
+        dmp_params2,
+        batch_size,
+        batch_s_t,
+        world,
+        world_bounds,
+        n_basis=3,
+        circular=False,
+        plot_only_first=False,
+        gradual=False):
+    
     dmp_params1, dmp_params2 = dmp_params1.detach().numpy(), dmp_params2.detach().numpy()
     batch_s_t = batch_s_t.detach().numpy()
     plt.figure(figsize=(3, 2.5))
     
     for b in range(batch_size):
+        if gradual:
+            alpha=b/batch_size * 0.7 + 0.3
+        else:
+            alpha=1
         if circular:
             world.reset()
         dmp_x1 = DMP1D(start=dmp_params1[b][0], goal=dmp_params1[b][2], n_basis=n_basis)
@@ -273,9 +289,9 @@ def generate_and_plot_trajectories_from_parameters(dmp_params1, dmp_params2, bat
         positions2, velocities2, collision2, collision_pos2, min_distance2 = simulation2.run()
 
         # Plot the trajectories
-        simulation1.plot(positions1, color='blue',plot_goal=False) 
+        simulation1.plot(positions1, color='blue',plot_goal=False,alpha=alpha) 
         if not plot_only_first:
-            simulation2.plot(positions2, color='red',plot_goal=False) 
+            simulation2.plot(positions2, color='red',plot_goal=False,alpha=alpha)
     
     plt.xlim([world_bounds[0]-0.1, world_bounds[1]+0.1])
     plt.ylim([world_bounds[2]-0.1, world_bounds[3]+0.1])
@@ -304,7 +320,7 @@ def generate_and_plot_trajectories_from_single_parameters(dmp_params, batch_size
     plt.show()
 
 
-def plot_example_trajectories_level_2(world,world_bounds,plot_goal = True, num_trajectories=10, orientation = None):
+def plot_example_trajectories_level_2(world,world_bounds,plot_goal = True, num_trajectories=10, orientation = None,n_basis=3):
 
     # Generate random start and goal positions
     start_position, goal_position1 = generate_random_positions(world, world_bounds=world_bounds)
@@ -475,9 +491,3 @@ def plot_reward_function(world,world_bounds, target_goal1, target_goal2):
         # Plot the trajectories
         simulation.plot(positions)
     plt.show()
-
-# target_goal1 = np.array([0.6, 0.4])
-# target_goal2 = np.array([0.4, 0.6])
-# plot_reward_function(world, world_bounds, target_goal1, target_goal2)
-
-

@@ -8,7 +8,7 @@ import pickle
 
 from continuous_nav_envs import World, generate_random_positions, CircularWorld
 from dmps import DMP1D,Simulation
-
+from scipy.signal import savgol_filter
 import gym
 from gym import spaces
 import numpy as np
@@ -246,11 +246,8 @@ if __name__ == "__main__":
     with open("performances/rat_td3_multi_env.pkl", "wb") as f:
         pickle.dump(performance, f)
 
-    from scipy.signal import savgol_filter
 
     plt.figure(figsize=(5,3))
-    plt.plot(np.linspace(0,500000,len(a)),a,color=[0.5,0.5,0.5],alpha=0.3)
-    plt.plot(np.linspace(0,500000,len(a)),savgol_filter(a,21,1),color=[0.5,0.5,0.5],linewidth=3)
     plt.plot(np.linspace(0,500000,len(performance)),performance,color=[0.1,0.1,0.1],alpha=0.3)
     plt.plot(np.linspace(0,500000,len(performance)),savgol_filter(performance,31,1),color=[0.1,0.1,0.1],linewidth=3)
     plt.ylim(0.2,1.0)

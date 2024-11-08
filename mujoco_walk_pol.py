@@ -6,7 +6,6 @@ import torch.optim as optim
 import torch.nn as nn
 import pickle
 import os
-import cv2
 import gym
 from stable_baselines3 import PPO
 import matplotlib.pyplot as plt
@@ -251,146 +250,7 @@ class RNNPlanner(nn.Module):
         return (torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size),
                 torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size))
 
-def render_video_ppo_two_models(model_index_1,model_index_2, video_filename="videos/ppo_trained_agent.mp4"):
-    
-    env = gym.make('AntBulletEnv-v0')
-    models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
 
-    # Reset environment
-    obs = env.reset()
-
-    # Define a video writer object to save the video
-    frame_size = env.render(mode="rgb_array").shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for .mp4 format
-    out = cv2.VideoWriter(video_filename, fourcc, 60, (frame_size[1], frame_size[0]))  # 60 fps for double speed
-
-    t=0
-    done = False
-    while not done:
-        if t<500:
-            model = models[model_index_1]
-            env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[model_index_1]
-            env.walk_target_x, env.walk_target_y = DIRECTIONS[model_index_1]
-        else:
-            model = models[model_index_2]
-            env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[model_index_2]
-            env.walk_target_x, env.walk_target_y = DIRECTIONS[model_index_2]
-
-        # Predict the next action using the PPO model
-        action, _states = model.predict(obs, deterministic=True)
-        
-        # Take a step in the environment
-        obs, _, done, _ = env.step(action)
-
-        # Render the environment and save the frame to the video
-        frame = env.render(mode="rgb_array")
-        out.write(frame)
-        t+=1
-
-    # Release the video writer object
-    out.release()
-
-    print(f"Video saved as {video_filename}")
-
-
-def render_video_ppo(model, env, video_filename="videos/ppo_trained_agent.mp4"):
-    """
-    Renders a video of the trained PPO agent's performance.
-    
-    Parameters:
-    - model: A trained PPO model.
-    - env: The gym environment.
-    - video_filename: The name of the video file to save.
-    """
-    
-    # Reset environment
-    obs = env.reset()
-
-    # Define a video writer object to save the video
-    frame_size = env.render(mode="rgb_array").shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for .mp4 format
-    out = cv2.VideoWriter(video_filename, fourcc, 60, (frame_size[1], frame_size[0]))  # 60 fps for double speed
-
-    done = False
-    while not done:
-        # Predict the next action using the PPO model
-        action, _states = model.predict(obs, deterministic=True)
-        
-        # Take a step in the environment
-        obs, _, done, _ = env.step(action)
-
-        # Render the environment and save the frame to the video
-        frame = env.render(mode="rgb_array")
-        out.write(frame)
-
-    # Release the video writer object
-    out.release()
-
-    print(f"Video saved as {video_filename}")
-
-
-def render_video_planner(planner, plan_length,video_filename="videos/planner_trained_agent.mp4"):
-
-    env = gym.make('AntBulletEnv-v0')
-    # Reset environment
-    obs = env.reset()
-    with SuppressPrints():
-        models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
-
-    # Define a video writer object to save the video
-    frame_size = env.render(mode="rgb_array").shape
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for .mp4 format
-    out = cv2.VideoWriter(video_filename, fourcc, 60, (frame_size[1], frame_size[0]))  # 60 fps for double speed
-
-    done = False
-
-    current_state = np.concatenate([env.robot.body_xyz[:-1]])
-    current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
-    hidden_planner = planner.init_hidden(1)
-    padded_zeros = torch.zeros(current_state_tensor.shape[0], plan_length-1, current_state_tensor.shape[2])
-    planner_input = torch.cat((current_state_tensor, padded_zeros), dim=1)
-    goals_pred, _ = planner(planner_input, hidden_planner)
-
-    visited_positions = []
-
-
-    for i in range(plan_length):
-        prim_array = goals_pred[0][i].clone().detach().numpy()
-        chosen_idx,T = map_to_direction(prim_array)
-        chosen_model = models[chosen_idx]
-        env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-        env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
-        print((chosen_idx,T))
-        
-        for t in range(T):
-            action, _ = chosen_model.predict(obs)
-            obs, _, done, _ = env.step(action)
-            # Render the environment and save the frame to the video
-            frame = env.render(mode="rgb_array")
-            out.write(frame)
-            if t % 20 == 0:
-                x, y, _ = env.robot.body_xyz
-                visited_positions.append((x, y))
-
-            if done:
-                break
-
-    # Release the video writer object
-    out.release()
-    x_positions, y_positions = zip(*visited_positions)
-    plt.scatter(x_positions, y_positions,color='#4B0082', s=11,alpha=0.8) 
-    plt.xlim(-13, 13)
-    plt.ylim(-13, 13)
-
-    # Plotting the reference lines
-    plt.axhline(0, color='grey', alpha=0.3)  # y = 0
-    plt.axvline(0, color='grey', alpha=0.3)  # x = 0
-    plt.plot([-13, 13], [-13, 13], color='grey', alpha=0.3)  # x = y
-    plt.plot([-13, 13], [13, -13], color='grey', alpha=0.3)  # x = -y
-
-    plt.show()
-
-    print(f"Video saved as {video_filename}")
 
 
 
@@ -613,8 +473,6 @@ def train_ppo_walking():
         # Save the model
         model_name = f"{path}/ppo_ant_dir_{i}"
         model.save(model_name)
-
-        render_video_ppo(model, env,video_filename=f"videos/ppo_trained_agent_{x_dir}_{y_dir}.mp4")
         env.close()
         i+=1
 
@@ -934,7 +792,3 @@ if __name__ == '__main__':
         plan_length=3,
         finetune_loops=0,
     )
-
-
-    render_video_planner(planner, plan_length=3)
-

@@ -125,7 +125,7 @@ class Simulation:
             
             # Check if position_track has at least one point to plot the last position
             if position_track.shape[0] > 0 and plot_goal:
-                plt.plot(position_track[-1, 0], position_track[-1, 1], 'x', color=color)
+                plt.plot(position_track[-1, 0], position_track[-1, 1], 'x', color=color,alpha=alpha)
 
         # if plot_goal:
         #     plt.scatter([self.dmp_x.start, self.dmp_x.goal], [self.dmp_y.start, self.dmp_y.goal], color='red')  # plot start and end points
