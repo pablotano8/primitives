@@ -141,10 +141,13 @@ def map_to_direction(output):
 
 
 def generate_data_walking_policies(num_sequences=20, 
-                                   path="trained_nets", 
+                                   path=None, 
                                    validation_size=0.05, 
                                    T_range=[50, 333]):
     """Generate training data from walking policies"""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trained_nets')
+
     env = gym.make('AntBulletEnv-v0')
 
     # Load all models
@@ -501,8 +504,9 @@ class RealWorldEnv(gym.Env):
         # Initialize environment and models if needed
         if self.env is None:
             self.env = gym.make('AntBulletEnv-v0')
+            _dir = os.path.dirname(os.path.abspath(__file__))
             with SuppressPrints():
-                self.models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
+                self.models = [PPO.load(os.path.join(_dir, "trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
         
         # Reset environment
         obs, _ = self.env.reset()
@@ -772,8 +776,9 @@ def generate_episode_with_model(model, plan_length=3):
     env = gym.make('AntBulletEnv-v0')
     
     # Load all primitive models
+    _dir = os.path.dirname(os.path.abspath(__file__))
     with SuppressPrints():
-        models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
+        models = [PPO.load(os.path.join(_dir, "trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
     
     # Data collection
     data, sequence = [], []

@@ -1,2 +1,7 @@
 # Ignore all directories and their contents
 */
+
+# But keep the walking policy models needed for MuJoCo Ant experiments
+!trained_nets/
+trained_nets/*
+!trained_nets/ppo_ant_dir_*.zip

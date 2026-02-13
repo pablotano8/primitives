@@ -260,8 +260,9 @@ def generate_figure_preds(plan_length=3,T_range = [200,500]):
     env = gym.make('AntBulletEnv-v0')
     # Reset environment
     obs, _ = env.reset()
+    _dir = os.path.dirname(os.path.abspath(__file__))
     with SuppressPrints():
-        models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
+        models = [PPO.load(os.path.join(_dir, 'trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
 
     done = False
 
@@ -324,8 +325,9 @@ def compute_dumb_pred_error(num_trials = 1000, plan_length=3,T_range = [200,500]
         print(trial)
         # Reset environment
         obs, _ = env.reset()
+        _dir = os.path.dirname(os.path.abspath(__file__))
         with SuppressPrints():
-            models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
+            models = [PPO.load(os.path.join(_dir, 'trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
 
         done = False
 
@@ -376,9 +378,12 @@ def compute_dumb_pred_error(num_trials = 1000, plan_length=3,T_range = [200,500]
 
 
 def generate_data_walking_policies(num_sequences=20, 
-                                   path="trained_nets", 
+                                   path=None, 
                                    validation_size=0.05, 
                                    T_range = [50,333]):
+
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trained_nets')
 
     env = gym.make('AntBulletEnv-v0')
 
@@ -462,7 +467,7 @@ def extract_position_from_data(train_data, valid_data):
 
 def train_ppo_walking():
 
-    path = 'trained_nets'
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trained_nets')
     # Training each model
     i=0
     for x_dir, y_dir in DIRECTIONS:
@@ -488,7 +493,8 @@ def generate_episode_with_planner(planner,env,plan_length=2):
     env = gym.make('AntBulletEnv-v0')
 
     # Load all models
-    models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    models = [PPO.load(os.path.join(_dir, "trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
 
     # Data collection
     data, sequence = [] , []
@@ -551,8 +557,9 @@ def evaluate_planner(planner, env, target_goal=[3.0, 4.5], task='one_goal', num_
     eval_rewards = []
     with torch.no_grad():
         env = gym.make('AntBulletEnv-v0')
+        _dir = os.path.dirname(os.path.abspath(__file__))
         with SuppressPrints():
-            models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}"),env) for i in range(9)]
+            models = [PPO.load(os.path.join(_dir, "trained_nets", f"ppo_ant_dir_{i}"),env) for i in range(9)]
 
         for episode in range(num_eval_episodes):
             episode_reward = []
@@ -640,8 +647,9 @@ def plot_trajectories(planner, target_goal=[3.0, 4.5], plan_length=3, num_plots=
     planner.eval()
     with torch.no_grad():
         env = gym.make('AntBulletEnv-v0')
+        _dir = os.path.dirname(os.path.abspath(__file__))
         with SuppressPrints():
-            models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
+            models = [PPO.load(os.path.join(_dir, "trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
 
         for _ in range(num_plots):
             obs, _ = env.reset()

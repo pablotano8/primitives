@@ -25,7 +25,7 @@ The key insight is that composing simple, highly predictable primitives keeps gr
 | `utils.py` | Shared utility functions for sampling DMP parameters, executing sequential DMPs in a world, and visualization helpers. |
 | `plot_trajectories.py` | Visualization utilities for plotting trajectories and comparing world model predictions against actual DMP simulations. |
 
-### Random Obstacle Environment (Figure 2a–b, Figures 3, 6)
+### Random Obstacle Environment (Figure 2a–b, 3, 4, 5 and 6)
 
 A point agent navigates around random rectangular obstacles in a circular arena. The world model receives position + wall-edge distances as input and predicts outcomes of 2-primitive sequences.
 
@@ -114,13 +114,3 @@ python complexity_tradeoff.py
 ```
 
 ## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@article{tano2025composing,
-  title={Composing predictable primitives for zero-shot learning},
-  author={Tano, Pablo and Bakermans, Jacob and Findling, Charles and Branco, Tiago and Pouget, Alexandre},
-  year={2025}
-}
-```
