@@ -1,12 +1,13 @@
 
 import numpy as np
-import gym
+import gymnasium as gym
+import pybullet_envs_gymnasium  # <-- this registers AntBulletEnv-v0 etc.
+
 import torch
 import torch.optim as optim
 import torch.nn as nn
 import pickle
 import os
-import gym
 from stable_baselines3 import PPO
 import matplotlib.pyplot as plt
 import os
@@ -258,7 +259,7 @@ def generate_figure_preds(plan_length=3,T_range = [200,500]):
 
     env = gym.make('AntBulletEnv-v0')
     # Reset environment
-    obs = env.reset()
+    obs, _ = env.reset()
     with SuppressPrints():
         models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
 
@@ -272,16 +273,17 @@ def generate_figure_preds(plan_length=3,T_range = [200,500]):
         T = np.random.randint(T_range[0], T_range[1])
         chosen_idx = np.random.randint(0, 9)
         chosen_model = models[chosen_idx]
-        env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-        env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
         print((chosen_idx,T))
         
         for t in range(T):
             action, _ = chosen_model.predict(obs)
-            obs, _, done, _ = env.step(action)
+            obs, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
             # Render the environment and save the frame to the video
             if t % 20 == 0:
-                x, y, _ = env.robot.body_xyz
+                x, y, _ = env.unwrapped.robot.body_xyz
                 visited_positions.append((x, y))
                 x_dumb += DIRECTIONS[chosen_idx][0]*0.0005
                 y_dumb  += DIRECTIONS[chosen_idx][1]*0.0005
@@ -321,13 +323,13 @@ def compute_dumb_pred_error(num_trials = 1000, plan_length=3,T_range = [200,500]
     for trial in range(num_trials):
         print(trial)
         # Reset environment
-        obs = env.reset()
+        obs, _ = env.reset()
         with SuppressPrints():
             models = [PPO.load(os.path.join('trained_nets', f"ppo_ant_dir_{i}")) for i in range(9)]
 
         done = False
 
-        current_state = np.concatenate([env.robot.body_xyz[:-1]])
+        current_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
         current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
         hidden_planner = planner.init_hidden(1)
         padded_zeros = torch.zeros(current_state_tensor.shape[0], plan_length-1, current_state_tensor.shape[2])
@@ -342,16 +344,17 @@ def compute_dumb_pred_error(num_trials = 1000, plan_length=3,T_range = [200,500]
             T = np.random.randint(T_range[0], T_range[1])
             chosen_idx = np.random.randint(0, 9)
             chosen_model = models[chosen_idx]
-            env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-            env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
+            env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+            env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
             print((chosen_idx,T))
             
             for t in range(T):
                 action, _ = chosen_model.predict(obs)
-                obs, _, done, _ = env.step(action)
+                obs, _, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
                 # Render the environment and save the frame to the video
                 if t % 20 == 0:
-                    x, y, _ = env.robot.body_xyz
+                    x, y, _ = env.unwrapped.robot.body_xyz
                     visited_positions.append((x, y))
                     x_dumb += DIRECTIONS[chosen_idx][0]*0.0005
                     y_dumb  += DIRECTIONS[chosen_idx][1]*0.0005
@@ -385,32 +388,33 @@ def generate_data_walking_policies(num_sequences=20,
 
     # Data collection
     data, sequence = [] , [] 
-    obs = env.reset()
+    obs, _ = env.reset()
 
     for i in range(num_sequences):
         if i%100==0:
             print(f'Generated {i} episodes of {num_sequences}')
         chosen_idx = np.random.randint(0, 9)
         chosen_model = models[chosen_idx]
-        initial_state = np.concatenate([obs, env.robot.body_xyz])
+        initial_state = np.concatenate([obs, env.unwrapped.robot.body_xyz])
         T = np.random.randint(T_range[0], T_range[1])
-        env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-        env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
 
         for t in range(T):
             action, _ = chosen_model.predict(obs, deterministic=True)
-            obs, _, done, _ = env.step(action)
+            obs, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
             
             # If T timesteps are reached or episode terminates
             if t == T - 1 or done:
-                final_state = np.concatenate([obs, env.robot.body_xyz])
+                final_state = np.concatenate([obs, env.unwrapped.robot.body_xyz])
                 prim_params = (DIRECTIONS[chosen_idx][0]*(t+1)*0.001*0.003,DIRECTIONS[chosen_idx][1]*(t+1)*0.001*0.003)  # t+1 because t is 0-indexed
                 sequence.append((initial_state, final_state, prim_params))
                 
                 # If the episode ends prematurely or we have enough data for this sequence
                 if done:
                     data.append(sequence)
-                    obs = env.reset()
+                    obs, _ = env.reset()
                     sequence = []
                     break
 
@@ -463,8 +467,8 @@ def train_ppo_walking():
     i=0
     for x_dir, y_dir in DIRECTIONS:
         env = gym.make('AntBulletEnv-v0')
-        env.walk_target_x, env.robot.walk_target_x = x_dir, x_dir
-        env.walk_target_y, env.robot.walk_target_y = y_dir, y_dir
+        env.unwrapped.walk_target_x, env.unwrapped.robot.walk_target_x = x_dir, x_dir
+        env.unwrapped.walk_target_y, env.unwrapped.robot.walk_target_y = y_dir, y_dir
         
         model = PPO("MlpPolicy", env, verbose=1)
 
@@ -489,8 +493,9 @@ def generate_episode_with_planner(planner,env,plan_length=2):
     # Data collection
     data, sequence = [] , []
     # Data collection
-    obs,done = env.reset(),False
-    current_state = np.concatenate([env.robot.body_xyz[:-1]])
+    obs, _ = env.reset()
+    done = False
+    current_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
     current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
     hidden_planner = planner.init_hidden(1)
     padded_zeros = torch.zeros(current_state_tensor.shape[0], plan_length-1, current_state_tensor.shape[2])
@@ -499,29 +504,30 @@ def generate_episode_with_planner(planner,env,plan_length=2):
     # Cumpute goals with Planner
     goals_pred, _ = planner(planner_input, hidden_planner)
     
-    initial_state = np.concatenate([env.robot.body_xyz[:-1]])
+    initial_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
 
     for i in range(plan_length):
 
         prim_array = goals_pred[0][i].clone().detach().numpy()
         chosen_idx,T = map_to_direction(prim_array)
         chosen_model = models[chosen_idx]
-        env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-        env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+        env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
 
         for t in range(T):
             action, _ = chosen_model.predict(obs)
-            obs, _, done, _ = env.step(action)
+            obs, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
             
             if t == T - 1 or done:
-                final_state = np.concatenate([env.robot.body_xyz[:-1]])
-                final_state = np.concatenate([env.robot.body_xyz[:-1]])
+                final_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
+                final_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
                 prim_params = (DIRECTIONS[chosen_idx][0]*(t+1)*0.001*0.003,DIRECTIONS[chosen_idx][1]*(t+1)*0.001*0.003)  # t+1 because t is 0-indexed
                 sequence.append((initial_state, final_state, prim_params))
                 
             if done:
                 break
-        current_state = np.concatenate([env.robot.body_xyz[:-1]])
+        current_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
         current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
 
     data.append(sequence)
@@ -540,7 +546,7 @@ def generate_episode_with_planner(planner,env,plan_length=2):
 
 
 
-def evaluate_planner(planner, env, task='one_goal', num_eval_episodes=1, plan_length=2):
+def evaluate_planner(planner, env, target_goal=[3.0, 4.5], task='one_goal', num_eval_episodes=1, plan_length=2):
     planner.eval()
     eval_rewards = []
     with torch.no_grad():
@@ -552,8 +558,10 @@ def evaluate_planner(planner, env, task='one_goal', num_eval_episodes=1, plan_le
             episode_reward = []
 
             # Data collection
-            obs,done = env.reset(),False
-            current_state = np.concatenate([env.robot.body_xyz[:-1]])
+            obs, _ = env.reset()
+            done = False
+            initial_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
+            current_state = initial_state.copy()
             current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
             hidden_planner = planner.init_hidden(1)
             padded_zeros = torch.zeros(current_state_tensor.shape[0], plan_length-1, current_state_tensor.shape[2])
@@ -562,31 +570,131 @@ def evaluate_planner(planner, env, task='one_goal', num_eval_episodes=1, plan_le
             # Cumpute goals with Planner
             goals_pred, _ = planner(planner_input, hidden_planner)
 
+            # Track positions at each step
+            positions = [initial_state]
+            
             for i in range(plan_length):
                 prim_array = goals_pred[0][i].clone().detach().numpy()
                 chosen_idx,T = map_to_direction(prim_array)
                 chosen_model = models[chosen_idx]
-                env.robot.walk_target_x, env.robot.walk_target_y = DIRECTIONS[chosen_idx]
-                env.walk_target_x, env.walk_target_y = DIRECTIONS[chosen_idx]
-                print((chosen_idx,T))
+                env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+                env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
                 for t in range(T):
                     action, _ = chosen_model.predict(obs)
-                    obs, _, done, _ = env.step(action)
+                    obs, _, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
                     if done:
                         break
-                print(np.concatenate([env.robot.body_xyz[:-1]]))
-                episode_reward.append(env.robot.body_xyz[0])
-
-            total_episode_reward = episode_reward[-1]
-            eval_rewards.append(total_episode_reward)
+                
+                # Record position after each primitive
+                current_pos = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
+                positions.append(current_pos)
+            
+            # Compute loss based on task type
+            if task == 'one_goal':
+                # Single goal at the end
+                loss = 0.3*(np.abs(positions[1][0] - 3) + np.abs(positions[1][1] - 2) +
+                        np.abs(positions[2][0] - 3) + np.abs(positions[2][1] - 2) +
+                        np.abs(positions[3][0] - 3) + np.abs(positions[3][1] - 2))
+            
+            elif task == 'two_goals':
+                # Two goals: waypoints at each step
+                # Matches: (0,2), (3,2), (3,2)
+                loss = (np.abs(positions[1][0] - 0) + np.abs(positions[1][1] - 2) +
+                        np.abs(positions[2][0] - 3) + np.abs(positions[2][1] - 2) +
+                        np.abs(positions[3][0] - 3) + np.abs(positions[3][1] - 2))
+            
+            elif task == 'explore_return':
+                # Explore away then return to start
+                loss = 0.3*(positions[1][0] + positions[1][1] +  # Maximize first position
+                        np.abs(positions[2][0] - initial_state[0]) +  # Return close to start
+                        np.abs(positions[2][1] - initial_state[1]) +
+                        np.abs(positions[3][0] - initial_state[0]) +
+                        np.abs(positions[3][1] - initial_state[1]))
+            
+            elif task == 'one_goal_obstacle':
+                # Goal at end, avoid obstacles in middle steps
+                loss = (np.abs(positions[3][0] - 3) + np.abs(positions[3][1] - 2) -
+                        0.1*np.abs(positions[1][1]) - 0.1*np.abs(positions[2][1]))
+            
+            elif task == 'safe_area':
+                # Stay near x=2.5, maximize variety in y
+                positions_array = np.array(positions[1:])  # Skip initial
+                loss = 5 * np.mean(np.abs(positions_array[:, 0] - 2.5)) - np.clip(np.var(positions_array[:, 1]), 0, 2)
+            
+            else:
+                # Default to single goal
+                final_position = positions[-1]
+                loss = np.mean(np.abs(final_position - np.array(target_goal)))
+            
+            performance = 1 - loss / 20
+            eval_rewards.append(performance)
 
     avg_reward = np.mean(eval_rewards)
 
     return avg_reward
 
 
+def plot_trajectories(planner, target_goal=[3.0, 4.5], plan_length=3, num_plots=1):
+    """Plot example trajectories from the planner"""
+    planner.eval()
+    with torch.no_grad():
+        env = gym.make('AntBulletEnv-v0')
+        with SuppressPrints():
+            models = [PPO.load(os.path.join("trained_nets", f"ppo_ant_dir_{i}")) for i in range(9)]
+
+        for _ in range(num_plots):
+            obs, _ = env.reset()
+            current_state = np.concatenate([env.unwrapped.robot.body_xyz[:-1]])
+            current_state_tensor = torch.tensor(current_state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
+            hidden_planner = planner.init_hidden(1)
+            padded_zeros = torch.zeros(current_state_tensor.shape[0], plan_length-1, current_state_tensor.shape[2])
+            planner_input = torch.cat((current_state_tensor, padded_zeros), dim=1)
+
+            # Compute goals with Planner
+            goals_pred, _ = planner(planner_input, hidden_planner)
+            
+            # Track positions
+            positions = [[0.0, 0.0]]
+            
+            for i in range(plan_length):
+                prim_array = goals_pred[0][i].clone().detach().numpy()
+                chosen_idx, T = map_to_direction(prim_array)
+                chosen_model = models[chosen_idx]
+                env.unwrapped.robot.walk_target_x, env.unwrapped.robot.walk_target_y = DIRECTIONS[chosen_idx]
+                env.unwrapped.walk_target_x, env.unwrapped.walk_target_y = DIRECTIONS[chosen_idx]
+                
+                for t in range(T):
+                    action, _ = chosen_model.predict(obs)
+                    obs, _, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
+                    
+                    # Sample positions every 10 steps
+                    if t % 10 == 0:
+                        pos = env.unwrapped.robot.body_xyz
+                        positions.append([pos[0], pos[1]])
+                    
+                    if done:
+                        break
+                
+                # Add final position of this primitive
+                pos = env.unwrapped.robot.body_xyz
+                positions.append([pos[0], pos[1]])
+            
+            positions = np.array(positions)
+            plt.figure(figsize=(6, 6))
+            plt.plot(positions[:, 0], positions[:, 1], 'o-', color='#4B0082', linewidth=1, markersize=5)
+            plt.scatter([target_goal[0]], [target_goal[1]], color='red', s=50, marker='*', zorder=5)
+            plt.xlim(-5, 5)
+            plt.ylim(-5, 5)
+            plt.xlabel('X Position')
+            plt.ylabel('Y Position')
+            plt.show()
+
+
 
 def train_planner_walk(train_data, planner, pred_net,env,
+                      target_goal=[3.0, 4.5],
                       finetune_loops=0,
                       plan_length=7,
                       eval_freq = 1,
@@ -596,6 +704,7 @@ def train_planner_walk(train_data, planner, pred_net,env,
                       batch_size=32,
                       clip_value=1.0,
                       early_stopping_threshold=1,
+                      plot=False,
                       ):
     
 
@@ -645,13 +754,14 @@ def train_planner_walk(train_data, planner, pred_net,env,
             # Distance Losses
 
             # One goal
-            distance_loss = (torch.abs(predicted_states[:, 1, 0]-3) + torch.abs(predicted_states[:, 1, 1]-4.5) + 
-                             torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-4.5)).mean()       
+            # distance_loss = (torch.abs(predicted_states[:, 0, 0]-3) + torch.abs(predicted_states[:, 0, 1]-2) + 
+            #                  torch.abs(predicted_states[:, 1, 0]-3) + torch.abs(predicted_states[:, 1, 1]-2) + 
+            #                  torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-2)).mean()    
 
             # Two goals
-            # distance_loss = (torch.abs(predicted_states[:, 0, 0]-0) + torch.abs(predicted_states[:, 0, 1]-2) + 
-            #                  torch.abs(predicted_states[:, 1, 0]-3) + torch.abs(predicted_states[:, 1, 1]-2) + 
-            #                  torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-2)).mean()       
+            distance_loss = (torch.abs(predicted_states[:, 0, 0]-0) + torch.abs(predicted_states[:, 0, 1]-2) + 
+                             torch.abs(predicted_states[:, 1, 0]-3) + torch.abs(predicted_states[:, 1, 1]-2) + 
+                             torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-2)).mean()       
 
             # Explore and Return
             # distance_loss = (predicted_states[:, 0, 0] + predicted_states[:, 0, 1] + 
@@ -662,7 +772,7 @@ def train_planner_walk(train_data, planner, pred_net,env,
 
             
             # One goal + Obstaclle
-            # distance_loss = (torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-0.5) + 
+            # distance_loss = (torch.abs(predicted_states[:, 2, 0]-3) + torch.abs(predicted_states[:, 2, 1]-2) + 
             #                  - torch.abs(predicted_states[:, 0, 1])- torch.abs(predicted_states[:, 1, 1])).mean()      
 
             # Safe Area
@@ -700,11 +810,12 @@ def train_planner_walk(train_data, planner, pred_net,env,
                             random_padding=True
                         )
 
-                reward = evaluate_planner(planner, env,num_eval_episodes=num_eval_episodes, plan_length=plan_length)
+                reward = evaluate_planner(planner, env, target_goal=target_goal, task='two_goals', num_eval_episodes=num_eval_episodes, plan_length=plan_length)
                 all_avg_rewards.append(reward)
 
                 print(f'Epoch {processed_batches*batch_size  / (len(train_data)):.4f}: Train = {loss.item():.4f}  Dist: {distance_loss:.4f}   Rec:{vae_loss:.4f}  Pred:{np.mean(pred_loss):.4f}   Perf: {reward:.4f}  Tuned: {finetune_count}')
                 finetune_count = 0
+                
                 # Check for early stopping condition
                 if reward > early_stopping_threshold:
                     print("Stopping early due to surpassing the performance threshold.")
@@ -719,18 +830,23 @@ if __name__ == '__main__':
 
     # train_ppo_walking() # Train PPO policies for all walking directions (they are already saved)
 
-    # Generate datasets with the trained models
-    train_data_rnn, valid_data_rnn = generate_data_walking_policies(num_sequences=500,T_range=[50,333])
-
-    # with open('datasets/train_data_walk_T50to333.pkl', 'wb') as f:
-    #     pickle.dump(train_data_rnn, f)
-    # with open('datasets/valid_data_walk_T50to333.pkl', 'wb') as f:
-    #     pickle.dump(valid_data_rnn, f)
-
-    with open('datasets/train_data_walk_T50to333.pkl', 'rb') as f:
-        train_data_rnn = pickle.load(f)
-    with open('datasets/valid_data_walk_T50to333.pkl', 'rb') as f:
-        valid_data_rnn = pickle.load(f)
+    # Load or generate training data
+    try:
+        with open('datasets/train_data_walk_T50to333.pkl', 'rb') as f:
+            train_data_rnn = pickle.load(f)
+        with open('datasets/valid_data_walk_T50to333.pkl', 'rb') as f:
+            valid_data_rnn = pickle.load(f)
+        print("Loaded existing training data")
+    except FileNotFoundError:
+        print("Generating new training data...")
+        train_data_rnn, valid_data_rnn = generate_data_walking_policies(num_sequences=500, T_range=[50, 333])
+        
+        # Save the data
+        os.makedirs('datasets', exist_ok=True)
+        with open('datasets/train_data_walk_T50to333.pkl', 'wb') as f:
+            pickle.dump(train_data_rnn, f)
+        with open('datasets/valid_data_walk_T50to333.pkl', 'wb') as f:
+            pickle.dump(valid_data_rnn, f)
 
     train_data,valid_data = extract_position_from_data(train_data_rnn,valid_data_rnn)
     # train_data,valid_data = train_data_rnn,valid_data_rnn
@@ -745,29 +861,36 @@ if __name__ == '__main__':
         bidirectional=False
     )
 
-    average_validation_loss, rnn_pred_net = train_pred_net_rnn(
-        train_data=train_data,
-        valid_data=valid_data,
-        pred_net=rnn_pred_net,
-        plan_length=3,
-        learning_rate=0.001,
-        num_epochs=10,
-        batch_size=32,
-        eval_freq=100,
-        random_padding=False
-    )
+    # Try to load existing model
+    try:
+        rnn_pred_net.load_state_dict(torch.load('trained_nets/rnn_Ant_walk_T50to300.pth'))
+        print("Loaded existing world model")
+    except FileNotFoundError:
+        print("Training new world model...")
+        average_validation_loss, rnn_pred_net = train_pred_net_rnn(
+            train_data=train_data,
+            valid_data=valid_data,
+            pred_net=rnn_pred_net,
+            plan_length=3,
+            learning_rate=0.001,
+            num_epochs=10,
+            batch_size=32,
+            eval_freq=100,
+            random_padding=False
+        )
 
-    # error1,error2,error3 = compute_dumb_pred_error(1000)
-    dumb_errors = 1 - np.array([1.41 ,2.96 ,3.75])/20  # (20 is the approximate size of the arena)
-    plt.figure(figsize=(4,2))
-    perf = np.array(average_validation_loss)
-    plt.plot(np.linspace(0,1000,len(perf[:1000,0])),1-np.array(perf[:1000,0])/20,color='#4B0082',linewidth=3)
-    plt.plot(np.linspace(0,1000,len(perf[:1000,1])),1-np.array(perf[:1000,1])/20,color='#4B0082',linewidth=3,alpha=0.7)
-    plt.plot(np.linspace(0,1000,len(perf[:1000,2])),1-np.array(perf[:1000,2])/20,color='#4B0082',linewidth=3,alpha=0.3)
-    plt.show()
-    # torch.save(rnn_pred_net.state_dict(), 'trained_nets/rnn_Ant_walk_T50to300_planlength4.pth')
+        # Save the model
+        os.makedirs('trained_nets', exist_ok=True)
+        torch.save(rnn_pred_net.state_dict(), 'trained_nets/rnn_Ant_walk_T50to300.pth')
 
-    rnn_pred_net.load_state_dict(torch.load('trained_nets/rnn_Ant_walk_T50to300.pth'))
+        # error1,error2,error3 = compute_dumb_pred_error(1000)
+        dumb_errors = 1 - np.array([1.41 ,2.96 ,3.75])/20  # (20 is the approximate size of the arena)
+        plt.figure(figsize=(4,2))
+        perf = np.array(average_validation_loss)
+        plt.plot(np.linspace(0,1000,len(perf[:1000,0])),1-np.array(perf[:1000,0])/20,color='#4B0082',linewidth=3)
+        plt.plot(np.linspace(0,1000,len(perf[:1000,1])),1-np.array(perf[:1000,1])/20,color='#4B0082',linewidth=3,alpha=0.7)
+        plt.plot(np.linspace(0,1000,len(perf[:1000,2])),1-np.array(perf[:1000,2])/20,color='#4B0082',linewidth=3,alpha=0.3)
+        plt.show()
 
     planner = RNNPlanner(
         input_size=2,
@@ -778,11 +901,14 @@ if __name__ == '__main__':
 
     env = gym.make('AntBulletEnv-v0')
 
+    target_goal = [3.0, 4.5]
+    
     planner,all_avg_rewards = train_planner_walk(
         train_data=train_data,
         planner=planner,
         pred_net=rnn_pred_net,
         env=env,
+        target_goal=target_goal,
         eval_freq=2000,
         num_eval_episodes = 1,
         learning_rate=0.001,
@@ -792,3 +918,20 @@ if __name__ == '__main__':
         plan_length=3,
         finetune_loops=0,
     )
+
+    # ============ Final Evaluation ============
+    print("=" * 50)
+    print("Final Zero-Shot Evaluation")
+    print("=" * 50)
+    
+    final_performance = evaluate_planner(
+        planner,
+        env,
+        target_goal=target_goal,
+        task='two_goals',
+        num_eval_episodes=100,
+        plan_length=3
+    )
+    print(f"Final Zero-Shot Performance: {final_performance:.4f}")
+
+    plot_trajectories(planner, target_goal=[3,2], plan_length=3)

@@ -4,10 +4,9 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 import copy
-from plot_trajectories import plot_example_trajectories, plot_predicted_vs_actual_trajectories
+from plot_trajectories import plot_example_trajectories, plot_predicted_vs_actual_trajectories, generate_and_plot_trajectories_from_parameters
 from utils import generate_trajectories_from_dmp_params
 from continuous_nav_envs import CircularWorld
-from plot_trajectories import generate_and_plot_trajectories_from_parameters
 from continuous_nav_envs import generate_random_positions
 from dmps import DMP1D,Simulation
 import matplotlib.pyplot as plt
@@ -47,6 +46,21 @@ class GoalNet(nn.Module):
         x = self.fc(x)
         return x, hidden
     
+def split_list(data, n_chunks):
+    """Split a list into n approximately equal chunks."""
+    chunk_size = len(data) // n_chunks
+    remainder = len(data) % n_chunks
+    
+    result = []
+    start = 0
+    for i in range(n_chunks):
+        # Add an extra element to the first 'remainder' chunks
+        chunk_end = start + chunk_size + (1 if i < remainder else 0)
+        result.append(data[start:chunk_end])
+        start = chunk_end
+    
+    return result
+
 
 def create_valid_data_subset(valid_data, target_position=[0, -0.75], distance_threshold=0.05):
     target_position = torch.tensor(target_position, dtype=torch.float32)
@@ -143,6 +157,35 @@ def generate_initial_states(
     return train_data, valid_data
 
 
+
+
+def visualize_initial_positions(train_data):
+    # Extract initial positions from each data point
+    positions = []
+    for data_point in train_data:
+        # The first element is s_t which contains the initial position
+        s_t = data_point[0]
+        # The first two elements of s_t are the x,y coordinates
+        positions.append(s_t[:2].numpy())
+    
+    # Convert to numpy array
+    positions = np.array(positions)
+    
+    # If there are more than 2000 points, randomly subsample
+    if len(positions) > 10000:
+        indices = np.random.choice(len(positions), 10000, replace=False)
+        positions = positions[indices]
+    
+    # Create the scatter plot
+    plt.figure(figsize=(8, 8))
+    plt.scatter(positions[:, 0], positions[:, 1], alpha=0.5, s=10)
+    # Add a circle to represent the boundary of the world (radius=1)
+    circle = plt.Circle((0, 0), 1, fill=False, color='red', linestyle='--')
+    plt.gca().add_patch(circle)
+
+    plt.show()
+
+
 def generate_data(
         world,
         world_bounds,
@@ -150,7 +193,8 @@ def generate_data(
         complexity = 1,
         orientation = None,
         varying_wall=False,
-        full_state_space = False):
+        full_state_space = False,
+        trip_wire=None):
     # Generate training data
     data = []
     for i in range(number_of_trajectories):  # Number of trajectories to generate
@@ -181,8 +225,9 @@ def generate_data(
                 distances_to_edges = np.array([np.linalg.norm(start_position - np.array(point)) for point in wall_shape])
                 
         # Initialize the first DMPs
-        dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=3, complexity=complexity)
-        dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=3, complexity=complexity)
+        complexity_scaled = complexity * ((np.abs(start_position[0] - goal_position1[0]) + np.abs(start_position[1] - goal_position1[1])) / 2)
+        dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=3, complexity=complexity_scaled)
+        dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=3, complexity=complexity_scaled)
 
         # Initialize the position and velocity of the agent
         start_velocity = np.array([0.0, 0.0])
@@ -197,28 +242,132 @@ def generate_data(
         _, goal_position2 = generate_random_positions(world, world_bounds=world_bounds,orientation = orientation)
 
         # Initialize the second DMPs with start position as the final position from the first DMP
-        dmp_x2 = DMP1D(start=positions1[-1][0], goal=goal_position2[0], n_basis=3,complexity=complexity)
-        dmp_y2 = DMP1D(start=positions1[-1][1], goal=goal_position2[1], n_basis=3,complexity=complexity)
+        complexity_scaled = complexity * ((np.abs(positions1[-1][0] - goal_position2[0]) + np.abs(positions1[-1][1] - goal_position2[1])) / 2)
+        dmp_x2 = DMP1D(start=positions1[-1][0], goal=goal_position2[0], n_basis=3,complexity=complexity_scaled)
+        dmp_y2 = DMP1D(start=positions1[-1][1], goal=goal_position2[1], n_basis=3,complexity=complexity_scaled)
 
         # Initialize the simulation with the world and the second DMPs
         simulation = Simulation(world, dmp_x2, dmp_y2, positions1[-1], T=1.0, dt=0.01)
 
         # Run the second simulation and record the positions
         positions2, velocities2, collision2,_ ,_= simulation.run()
+        
+        # Flag to track if any trajectory crossed a trip wire
+        crossed_trip_wire = False
+        
+        # Check for trip wire crossings if trip_wire is provided
+        if trip_wire is not None:
+            # Process the first trajectory
+            if not isinstance(trip_wire, bool):  # Skip if it's False
+                for wire in trip_wire:
+                    # Each wire is defined by two points [(x1,y1), (x2,y2)]
+                    p1, p2 = wire
+                    
+                    # Check each segment of the trajectory
+                    for j in range(1, len(positions1)):
+                        current_x, current_y = positions1[j]
+                        prev_x, prev_y = positions1[j-1]
+                        
+                        # Check if the trajectory segment intersects the trip wire
+                        s1_x = current_x - prev_x
+                        s1_y = current_y - prev_y
+                        s2_x = p2[0] - p1[0]
+                        s2_y = p2[1] - p1[1]
+                        
+                        denom = (-s2_x * s1_y + s1_x * s2_y)
+                        if denom != 0:  # Non-parallel lines
+                            s = (-s1_y * (prev_x - p1[0]) + s1_x * (prev_y - p1[1])) / denom
+                            t = (s2_x * (prev_y - p1[1]) - s2_y * (prev_x - p1[0])) / denom
+                            
+                            if 0 <= s <= 1 and 0 <= t <= 1:  # Intersection found
+                                # Calculate which side of the wire each point is on
+                                wire_dir_x = p2[0] - p1[0]
+                                wire_dir_y = p2[1] - p1[1]
+                                
+                                # Calculate normal vector to the wire (pointing "up")
+                                normal_x = -wire_dir_y
+                                normal_y = wire_dir_x
+                                
+                                # Make sure normal points "up" (positive y direction on average)
+                                if normal_y < 0:
+                                    normal_x = -normal_x
+                                    normal_y = -normal_y
+                                
+                                # Check which side each point is on
+                                prev_side = (prev_x - p1[0]) * normal_x + (prev_y - p1[1]) * normal_y
+                                current_side = (current_x - p1[0]) * normal_x + (current_y - p1[1]) * normal_y
+                                
+                                # If crossing from below to above, mark as crossed
+                                if prev_side < 0 and current_side > 0:
+                                    crossed_trip_wire = True
+                                    break
+                    
+                    if crossed_trip_wire:
+                        break
+            
+            # Process the second trajectory with the same logic
+            if not crossed_trip_wire and not isinstance(trip_wire, bool):  # Skip if it's False or already crossed
+                for wire in trip_wire:
+                    # Each wire is defined by two points [(x1,y1), (x2,y2)]
+                    p1, p2 = wire
+                    
+                    # Check each segment of the trajectory
+                    for j in range(1, len(positions2)):
+                        current_x, current_y = positions2[j]
+                        prev_x, prev_y = positions2[j-1]
+                        
+                        # Check if the trajectory segment intersects the trip wire
+                        s1_x = current_x - prev_x
+                        s1_y = current_y - prev_y
+                        s2_x = p2[0] - p1[0]
+                        s2_y = p2[1] - p1[1]
+                        
+                        denom = (-s2_x * s1_y + s1_x * s2_y)
+                        if denom != 0:  # Non-parallel lines
+                            s = (-s1_y * (prev_x - p1[0]) + s1_x * (prev_y - p1[1])) / denom
+                            t = (s2_x * (prev_y - p1[1]) - s2_y * (prev_x - p1[0])) / denom
+                            
+                            if 0 <= s <= 1 and 0 <= t <= 1:  # Intersection found
+                                # Calculate which side of the wire each point is on
+                                wire_dir_x = p2[0] - p1[0]
+                                wire_dir_y = p2[1] - p1[1]
+                                
+                                # Calculate normal vector to the wire (pointing "up")
+                                normal_x = -wire_dir_y
+                                normal_y = wire_dir_x
+                                
+                                # Make sure normal points "up" (positive y direction on average)
+                                if normal_y < 0:
+                                    normal_x = -normal_x
+                                    normal_y = -normal_y
+                                
+                                # Check which side each point is on
+                                prev_side = (prev_x - p1[0]) * normal_x + (prev_y - p1[1]) * normal_y
+                                current_side = (current_x - p1[0]) * normal_x + (current_y - p1[1]) * normal_y
+                                
+                                # If crossing from below to above, mark as crossed
+                                if prev_side < 0 and current_side > 0:
+                                    crossed_trip_wire = True
+                                    break
+                    
+                    if crossed_trip_wire:
+                        break
 
-        # Add the data to the training set
-        dmp_params1 = [dmp_x1.start, dmp_y1.start, dmp_x1.goal, dmp_y1.goal, *dmp_x1.weights, *dmp_y1.weights]
-        dmp_params2 = [dmp_x1.goal, dmp_y1.goal, dmp_x2.goal, dmp_y2.goal, *dmp_x2.weights, *dmp_y2.weights]
-        if full_state_space:
-            s_t = np.concatenate(
-                (positions1[0],
-                np.array([world.wall_present*1.0]),
-                distances_to_edges))
-        else:
-            s_t = positions1[0]
-        if not world.wall_present:
-            collision1, collision2 = np.array([0.0]), np.array([0.0])
-        data.append((s_t, True, positions1[-1], positions2[-1], dmp_params1, dmp_params2, collision1*1, collision2*1))
+        # Only add the data to the training set if the trajectory didn't cross any trip wire
+        if not crossed_trip_wire:
+            # Add the data to the training set
+            dmp_params1 = [dmp_x1.start, dmp_y1.start, dmp_x1.goal, dmp_y1.goal, *dmp_x1.weights, *dmp_y1.weights]
+            dmp_params2 = [dmp_x1.goal, dmp_y1.goal, dmp_x2.goal, dmp_y2.goal, *dmp_x2.weights, *dmp_y2.weights]
+            if full_state_space:
+                s_t = np.concatenate(
+                    (positions1[0],
+                    np.array([world.wall_present*1.0]),
+                    distances_to_edges))
+            else:
+                s_t = positions1[0]
+            if not world.wall_present:
+                collision1, collision2 = np.array([0.0]), np.array([0.0])
+            data.append((s_t, True, positions1[-1], positions2[-1], dmp_params1, dmp_params2, collision1*1, collision2*1))
 
     # Split the data into training and validation sets
     split_idx = int(len(data) * 0.9)  # Use 80% of the data for training
@@ -470,7 +619,8 @@ def train(train_data,
           world=None,
           valid_batch_size=50,
           plot_only_first=False,
-          testing_dumb_model = False):
+          testing_dumb_model = False,
+          trip_wire = None):
     
     # Optimizer
     optimizer_goal = optim.Adam(net_goal.parameters(), lr=learning_rate, weight_decay=0)
@@ -478,7 +628,7 @@ def train(train_data,
 
     stop_training, num_epochs_with_network = False, 0
 
-    training_sets = np.array_split(train_data, 10)
+    training_sets = split_list(train_data, 10)
     # Loss function
     criterion = nn.MSELoss()
     criterion2 = nn.BCEWithLogitsLoss()
@@ -491,8 +641,7 @@ def train(train_data,
             # Training goal network
             net_goal.train()
             train_losses = []
-            samples_inverse_dynamics = train_data_epoch[
-                np.random.randint(0, len(train_data_epoch)-batch_size, size=num_samples_inverse_dynamics)]
+            samples_inverse_dynamics = random.choices(train_data_epoch, k=num_samples_inverse_dynamics)
             for _ in range(num_iterations_inverse_dynamics):
                 for i in range(0, len(samples_inverse_dynamics), batch_size):
                     batch = samples_inverse_dynamics[i:i+batch_size]
@@ -519,8 +668,25 @@ def train(train_data,
                     # Separate the position and DMP weights for clamping
                     dmp_params1_weights = dmp_params1[:, 4:].clamp(-bound_dmp_weights, bound_dmp_weights)
                     dmp_params2_weights = dmp_params2[:, 4:].clamp(-bound_dmp_weights, bound_dmp_weights)
+                    
+                    # Calculate complexity scaling factors based on Manhattan distance
+                    # For first trajectory: start -> goal1
+                    start_pos1 = batch_s_t[:,:2]
+                    goal_pos1 = dmp_params1[:, 2:4] + target_goal_batch
+                    complexity_scale1 = ((torch.abs(start_pos1[:,0] - goal_pos1[:,0]) + 
+                                        torch.abs(start_pos1[:,1] - goal_pos1[:,1])) / 2).unsqueeze(1)
+                    
+                    # For second trajectory: goal1 -> goal2
+                    start_pos2 = dmp_params1[:, 2:4] + target_goal_batch
+                    goal_pos2 = dmp_params2[:, 2:4] + target_goal_batch
+                    complexity_scale2 = ((torch.abs(start_pos2[:,0] - goal_pos2[:,0]) + 
+                                        torch.abs(start_pos2[:,1] - goal_pos2[:,1])) / 2).unsqueeze(1)
+                    
+                    # Apply scaling to weights
+                    dmp_params1_weights = dmp_params1_weights * complexity_scale1.repeat(1, dmp_params1_weights.size(1))
+                    dmp_params2_weights = dmp_params2_weights * complexity_scale2.repeat(1, dmp_params2_weights.size(1))
 
-                    # Concatenate the positions and clamped weights
+                    # Concatenate the positions and scaled weights
                     dmp_params1 = torch.cat([dmp_params1_positions, dmp_params1_weights], dim=1)
                     dmp_params2 = torch.cat([dmp_params2_positions, dmp_params2_weights], dim=1)
 
@@ -562,12 +728,16 @@ def train(train_data,
                         loss_goal = loss_goal2 +loss_goal1 +  0.25 * (
                             loss_coll1 + loss_coll2) + 1 * (outside_circle1 + outside_circle2)
                             
+                        # loss_goal = loss_goal2 +loss_goal1 + 1 * (outside_circle1 + outside_circle2)
                         
                     elif task == "home_run_no_wall":
                         loss_goal = loss_goal1+loss_goal2
 
                     elif task == "home_run_one_primitive":
-                        loss_goal = loss_goal1
+                        loss_goal = loss_goal1 + 0.25 * (
+                            loss_coll1) + 1 * (
+                                outside_circle1 )
+                        # loss_goal = loss_goal1 
                         plot_only_first=True
 
                     elif task == "explore_obstacle":
@@ -654,8 +824,13 @@ def train(train_data,
                     n_basis=3)
                 
                 if plot_trajectories:
-                    generate_and_plot_trajectories_from_parameters(dmp_params1, dmp_params2, 10, batch_s_t[:,:2], world, world_bounds, n_basis=3, circular=True,plot_only_first=plot_only_first)
-                    
+                    generate_and_plot_trajectories_from_parameters(
+                        dmp_params1, dmp_params2, min(len(dmp_params1),10), batch_s_t[:,:2], world, world_bounds, n_basis=3,
+                        circular=True,
+                        plot_only_first=plot_only_first,
+                        trip_wire=trip_wire)
+
+
                 loss1 = np.mean(np.abs(np.array(actual_final_position1) - np.array(target_goal1)))
                 loss2 = np.mean(np.abs(np.array(actual_final_position2) - np.array(target_goal2)))
                 loss = np.max([1 - loss2,1-loss1])
@@ -671,7 +846,6 @@ def train(train_data,
     return valid_losses, net_goal, net_preds
 
 
-
 if __name__ == "__main__":
 
     # Initialize the world
@@ -679,7 +853,20 @@ if __name__ == "__main__":
     world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True,wall_size=0.6)
 
     # Check the environment
-    plot_example_trajectories(world,world_bounds,number_of_trajectories=10,complexity=2.5,circular=True)
+    plot_example_trajectories(
+        world,world_bounds,
+        number_of_trajectories=100,
+        complexity=5.0,
+        circular=True,
+        random_position=False,
+        n_basis=3,
+        start_position=np.array([0.0, 0.85]),
+        goal_position=np.array([0.0, -0.85]),
+        # trip_wire = None)
+        # trip_wire=[[(-0.30,-1.00),(-0.1,-0.4)],[(0.30,-1.00),(0.1,-0.4)]])
+        trip_wire=[[(-0.7,-0.75),(0.2,0.0)],[(0.7,-0.75),(-0.2,0.0)]])
+        # trip_wire=[[(-1.0,0.25),(0.0,0.0)],[(1.0,0.25),(0.0,0.0)]])
+    
 
     # Collect Data for Predictive Net (Varying wall)
     train_data,valid_data= generate_data(
@@ -687,10 +874,11 @@ if __name__ == "__main__":
         world_bounds,
         number_of_trajectories=25000,
         orientation=None,
-        complexity=0.5,
+        complexity=5.0,
         varying_wall=True,
         full_state_space=True)
-    training_sets = np.array_split(train_data, 10)
+    
+    training_sets = split_list(train_data, 10)
 
     # Initialize the network Level 1
     net = PredNet(input_size=2+2+2+6+5, hidden_size=64, output_size=3, dropout_rate=0.1)
@@ -717,32 +905,37 @@ if __name__ == "__main__":
         world,
         net,
         world_bounds,
-        number_of_trajectories=4,
+        number_of_trajectories=10,
         circular=True,
-        complexity=1.0,
+        complexity=5.0,
         varying_wall=True)
 
-
-    # Collect Data during Explloration
-    world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True,wall_size=0.5)
+    # Collect Data during Exploration
+    world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True,wall_size=0.6)
     train_data_with_wall,valid_data_with_wall= generate_data(
         world,
         world_bounds,
-        number_of_trajectories=10000,
+        number_of_trajectories=100,
         orientation=None,
-        complexity=0.5,
+        complexity=1.5,
         varying_wall=False,
-        full_state_space=True)
+        full_state_space=True,
+        # trip_wire=None)
+        # trip_wire=[[(-0.30,-1.00),(-0.1,-0.4)],[(0.30,-1.00),(0.1,-0.4)]])
+        trip_wire=[[(-0.7,-0.75),(0.2,0.0)],[(0.7,-0.75),(-0.2,0.0)]])
+        # trip_wire=[[(-1.0,0.25),(0.0,0.0)],[(1.0,0.25),(0.0,0.0)]])
+    visualize_initial_positions(train_data_with_wall)
+        
     escape_valid_data_with_wall = create_valid_data_subset(valid_data_with_wall,target_position=torch.tensor([0, -0.85]), distance_threshold=0.3)
 
     # Collect Data during Escape
-    new_world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=False,wall_size=0.5)
+    new_world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=False,wall_size=0.6)
     train_data_without_wall,valid_data_without_wall= generate_data(
         new_world,
         world_bounds,
-        number_of_trajectories=10000,
+        number_of_trajectories=1000,
         orientation=None,
-        complexity=0.5,
+        complexity=1.5,
         varying_wall=False,
         full_state_space=True)
     escape_valid_data_without_wall = create_valid_data_subset(valid_data_without_wall,target_position=torch.tensor([0, -0.85]), distance_threshold=0.3)
@@ -762,7 +955,7 @@ if __name__ == "__main__":
     # Create data with wall blocking threat zone
     data_with_wall_blocking_threat_zone = create_data_with_wall_blocking_threat_zone(
         train_data_with_wall,
-        height_threshold=-0.2)
+        height_threshold=-0.4)
 
     # Create data without threat zone
     data_without_threat_zone = create_data_without_threat_zone(
@@ -791,7 +984,7 @@ if __name__ == "__main__":
 
 
     # Training Phase
-    task = 'home_run_explo'
+    task = 'home_run_one_primitive'
     net_goal = GoalNet(input_size=2, hidden_size=64, output_size=2+2+6, dropout_rate=0.1)
     net_preds = [copy.deepcopy(net), copy.deepcopy(net)]
     valid_losses, net_goal, net_preds = train(
@@ -805,18 +998,19 @@ if __name__ == "__main__":
         fine_tune_pred_nets = False,
         num_samples_inverse_dynamics = 10000,
         num_iterations_inverse_dynamics = 1,
-        bound_dmp_weights = 0.5,
-        early_stopping_threshold = 0.95,
+        bound_dmp_weights = 5.0,
+        early_stopping_threshold = 1.0,
         learning_rate = 0.001,
         batch_size = 10,
         num_epochs = 10,
         plot_trajectories = True,
         world = world,
-        valid_batch_size=50)
+        valid_batch_size=5,
+        trip_wire=None)
     
 
     # Testing Phase
-    task = 'home_run_explo'
+    task = 'home_run_one_primitive'
     net_goal_test = copy.deepcopy(net_goal)
     valid_losses, net_goal_test, net_preds = train(
         train_data = train_data_without_wall,
@@ -829,10 +1023,12 @@ if __name__ == "__main__":
         fine_tune_pred_nets = False,
         num_samples_inverse_dynamics = 100,
         num_iterations_inverse_dynamics = 1,
-        bound_dmp_weights = 1.0,
+        bound_dmp_weights = 5.0,
         early_stopping_threshold = 1.00,
-        learning_rate = 0.001,
+        learning_rate = 0.0001,
         batch_size = 15,
         num_epochs = 100,
         plot_trajectories = True,
-        world=new_world,)
+        world=new_world,
+        valid_batch_size=5,
+        trip_wire=None,)

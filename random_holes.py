@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from utils import sample_random_dmp_params, generate_trajectories_from_dmp_params, plot_value_function
 from continuous_nav_envs import World, generate_random_positions
 from dmps import DMP1D,Simulation
-from plot_trajectories import generate_and_plot_trajectories_from_parameters
+from plot_trajectories import generate_and_plot_trajectories_from_parameters, plot_dmp_weight_space
 class GoalNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.3):
         super(GoalNet, self).__init__()
@@ -79,6 +79,10 @@ def generate_initial_states(
                 torch.tensor(s_t_plus_one, dtype=torch.float32)) for s_t, s_t_plus_one in valid_data]
     return train_data, valid_data
 
+def list_split(lst, n):
+    """Split a list into n roughly equal parts without converting to numpy array."""
+    k, m = divmod(len(lst), n)
+    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
 
 def generate_data(
         world,
@@ -378,7 +382,8 @@ def train(train_data,
                 outside_square2 = (penalty_x2 + penalty_y2).mean()
 
                 if task == "reach_final_goal":
-                    loss_goal = 0.5*loss_goal1 + loss_goal2 + 0.25*  (loss_coll1 + loss_coll2) + outside_square1 + outside_square2
+                    # loss_goal = loss_goal2
+                    loss_goal = loss_goal1 + loss_goal2 + 0.25*  (loss_coll1 + loss_coll2) + outside_square1 + outside_square2
                 elif task == "reach_two_goals":
                     target_goal_batch1 = torch.stack([torch.tensor(target_goal1) for _ in batch])
                     target_goal_batch2 = torch.stack([torch.tensor(target_goal2) for _ in batch])
@@ -517,7 +522,19 @@ if __name__ == "__main__":
 
     # Initialize the world
     world_bounds = [0.1, 0.9, 0.1, 0.9]
-    world = World( world_bounds=world_bounds,friction=0,obs_random_position= True,num_obstacles=2)
+    world = World( world_bounds=world_bounds,friction=0,obs_random_position= True,num_obstacles=1)
+
+    # Check optimization space
+    plot_dmp_weight_space(
+        world,
+        world_bounds,
+        start_position = [0.2, 0.2],
+        goal_position = [0.8, 0.8],
+        n_basis=3,
+        complexity=3.5,
+        number_of_examples_per_weight=5,
+        number_to_plot=100)
+
 
     # Check the environment
     plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=1.0)
@@ -529,7 +546,7 @@ if __name__ == "__main__":
         number_of_trajectories=200_000,
         complexity=1.0,
         random_world=True)
-    training_sets = np.array_split(train_data, 10)
+    training_sets = list_split(train_data, 10)
 
     # Initialize the network Level 1
     net = PredNet(input_size=2+2+2+6+4, hidden_size=64, output_size=3, dropout_rate=0.1)
@@ -570,7 +587,7 @@ if __name__ == "__main__":
     # Collect States for MP (only random world)
     world = World( world_bounds=world_bounds,friction=0,given_centers = [(0.25, 0.25),(0.6, 0.6)])
     plot_example_trajectories(world,world_bounds,number_of_trajectories=5,complexity=1.0)
-    train_data_mp,valid_data_mp = generate_data(world,world_bounds,number_of_trajectories=500,random_world=False)
+    train_data_mp,valid_data_mp = generate_data(world,world_bounds,number_of_trajectories=2000,random_world=False)
     # train_data_mp,valid_data_mp = generate_initial_states(world,world_bounds,number_of_states=100000)
 
     # Value network for RL
@@ -592,13 +609,13 @@ if __name__ == "__main__":
             target_goal1 = target_goal1,
             target_goal2 = target_goal2,
             task = task,
-            bound_dmp_weights=0.9,
-            early_stopping_threshold = 0.99,
+            bound_dmp_weights=1.0,
+            early_stopping_threshold = 1.0,
             eval_freq=5,
-            learning_rate=0.001,
+            learning_rate=0.005,
             batch_size=10,
             num_epochs=100,
-            plot_trajectories=True,
+            plot_trajectories=False,
             number_trajectories_plot = 6,
             testing_dumb_model=False)
         valid_loss_task[task] = valid_losses

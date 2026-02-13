@@ -602,7 +602,7 @@ if __name__ == "__main__":
 
     pred_loss1,pred_loss2,performances = [] , [] , []
     # for comp in np.linspace(0,2.5,10):
-    for comp in [0.5]:
+    for comp in [4.0]:
         print(f'COMPLEXITY = {comp}')
         # Collect Data for Predictive Net (Varying wall)
         train_data,valid_data= generate_data(
@@ -706,19 +706,19 @@ if __name__ == "__main__":
     # MP Search Space (i.e. number of grid points assuming 1 grid point every 0.1 for the every parameter)
     mp_space_compositional = []
     mp_space_non_compositional = []
-    grid_points = 0.1
-    for comp in np.linspace(0,25,100):
+    grid_points = 0.001
+    for comp in np.linspace(0,0.1,1000):
         #assume 1 grid point 
         spline_points =  (np.round(comp/grid_points))**6 #6 splines (3 for each dimension)
         goal_points = (2/grid_points)**2
 
-        mp_space_compositional.append(2* spline_points + 2 * goal_points)
-        mp_space_non_compositional.append(spline_points+goal_points)
+        mp_space_compositional.append(1/( 2*spline_points + 2 * goal_points))
+        mp_space_non_compositional.append(1/(spline_points+goal_points))
 
     import matplotlib.pyplot as plt
     plt.figure(figsize=(3,2.5))
-    plt.semilogy(np.linspace(0,2.5,100),mp_space_non_compositional,linewidth=5, color='purple')
-    plt.semilogy(np.linspace(0,2.5,100),mp_space_compositional,linewidth=5, color='#006666')
+    plt.plot(np.linspace(0,2.5,1000),mp_space_non_compositional,linewidth=4, color='purple')
+    plt.plot(np.linspace(0,2.5,1000),mp_space_compositional,linewidth=4, color='#FF9900')
     plt.show()
 
 

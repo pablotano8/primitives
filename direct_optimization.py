@@ -294,8 +294,7 @@ def train(initial_state,
         dmp_params2 = net_goal()[10:]
 
         # Force the start positions in dmp_params1 and dmp_params2, and center in home reference frame
-        dmp_params1_positions = torch.cat([state[:2], dmp_params1[2:4]])
-        dmp_params2_positions = torch.cat([dmp_params1[2:4] , dmp_params2[2:4]])
+t
 
         # Separate the position and DMP weights for clamping
         dmp_params1_weights = dmp_params1[4:]

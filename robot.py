@@ -88,10 +88,14 @@ def plot_example_trajectories_robot(
         bounds,
         number_of_trajectories=10,
         complexity = 1,
-        aim_for_block = False):
+        aim_for_block = False,
+        plot_block=True):
     # Generate training data
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
+    ax.set_xlim(bounds[0], bounds[1])
+    ax.set_ylim(bounds[2], bounds[3])
+    ax.set_zlim(0.4, 0.45)
 
     for i in range(number_of_trajectories):  # Number of trajectories to generate
         obs = env.reset()
@@ -104,13 +108,13 @@ def plot_example_trajectories_robot(
                 low=np.array([
                     start_position_object[0]-0.1,
                     start_position_object[1]-0.1,
-                    start_position_object[2]-0.05
+                    start_position_object[2]-0.005
                     ]),high=np.array([
                         start_position_object[0]+0.1,
                         start_position_object[1]+0.1,
-                        start_position_object[2]+0.05
+                        start_position_object[2]+0.005
                         ]))
-
+            
         # Initialize the first DMPs
         dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=1, complexity=complexity)
         dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=1, complexity=complexity)
@@ -140,8 +144,9 @@ def plot_example_trajectories_robot(
         ax.plot(positions1[:, 0], positions1[:, 1], positions1[:, 2], '.',label='Trajectory', color='b')
         ax.scatter(goal_position2[0], goal_position2[1], goal_position2[2], color='r', label='Goal', marker='x')
         ax.plot(positions2[:, 0], positions2[:, 1], positions2[:, 2], '.',label='Trajectory', color='r')
-        ax.plot(object1[:, 0], object1[:, 1], object1[:, 2], '.',label='Trajectory', color='green')
-        ax.plot(object2[:, 0], object2[:, 1], object2[:, 2], '.',label='Trajectory', color='orange')
+        if plot_block:
+            ax.plot(object1[:, 0], object1[:, 1], object1[:, 2], '.',label='Trajectory', color='green')
+            ax.plot(object2[:, 0], object2[:, 1], object2[:, 2], '.',label='Trajectory', color='orange')
     plt.show()
 
 def plot_predictions_robot(
@@ -165,11 +170,11 @@ def plot_predictions_robot(
                 low=np.array([
                     start_position_object[0]-0.1,
                     start_position_object[1]-0.1,
-                    start_position_object[2]-0.05
+                    start_position_object[2]-0.005
                     ]),high=np.array([
                         start_position_object[0]+0.1,
                         start_position_object[1]+0.1,
-                        start_position_object[2]+0.05
+                        start_position_object[2]+0.005
                         ]))
 
         # Initialize the first DMPs
@@ -264,11 +269,11 @@ def generate_data(
                 low=np.array([
                     start_position_object[0]-0.1,
                     start_position_object[1]-0.1,
-                    start_position_object[2]-0.05
+                    start_position_object[2]-0.005
                     ]),high=np.array([
                         start_position_object[0]+0.1,
                         start_position_object[1]+0.1,
-                        start_position_object[2]+0.05
+                        start_position_object[2]+0.005
                         ]))
             
         # Initialize the first DMPs
@@ -447,16 +452,16 @@ def train_predictive_net(train_data,
 if __name__ == "__main__":
 
     env = gym.make('FetchPush-v2', max_episode_steps=200)
-    bounds = [1,1.5,0.5,1,0.42,0.46]
-
-    plot_example_trajectories_robot(env,bounds,1,complexity=1,aim_for_block=False)
+    bounds = [1.15,1.55,0.55,0.95,0.42,0.43] #checked by plotting tons of desired goals
+    plot_example_trajectories_robot(env,bounds,1,complexity=1,aim_for_block=False,plot_block=True)
 
     # Collect Data for Predictive Net
     train_data,valid_data= generate_data(
         env,
         bounds,
         number_of_trajectories=100_000,
-        complexity=0.5)
+        complexity=0.5,
+        aim_for_block=False)
 
     # Train Predictive Net
     net = PredNet(input_size=6+2, hidden_size=64, output_size=5, dropout_rate=0.1)

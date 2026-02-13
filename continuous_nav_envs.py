@@ -326,7 +326,8 @@ class World:
         xmin, xmax, ymin, ymax = self.world_bounds
 
         if self.given_obstacles is not None: 
-            self.add_obstacle(self.given_obstacles)
+            for obstacle in self.given_obstacles:
+                self.add_obstacle(obstacle)
                     
         elif self.given_centers is not None:
             self.centers = given_centers

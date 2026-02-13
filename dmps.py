@@ -24,7 +24,11 @@ class DMP1D:
         self.complexity = complexity
 
         self.basis_centers = np.linspace(0, 1, n_basis)
-        self.basis_widths = np.ones(n_basis) * 1.0 / (0.65 * (self.basis_centers[1] - self.basis_centers[0]) ** 2)
+        if n_basis>1:
+            self.basis_widths = np.ones(n_basis) * 1.0 / (0.65 * (self.basis_centers[1] - self.basis_centers[0]) ** 2)
+        else:
+            self.basis_centers = np.array([0.5])
+            self.basis_widths = np.array([0.5])
         self.weights = np.random.randn(n_basis)*self.complexity
 
     def basis(self, x):
@@ -53,7 +57,10 @@ class DMP1D:
     
     def step(self, y, z, x, dt):
         f = self.forcing_term(x)
-        dz = self.alpha_z * (self.beta_z * (self.goal - y) - z + f * (self.goal - self.start)) / self.alpha_x
+        # The issue is here - when goal equals start, the forcing term has no effect
+        # Add a small scaling factor when goal-start is too small
+        scaling = 1.0  # Use a default scaling when goal and start are the same
+        dz = self.alpha_z * (self.beta_z * (self.goal - y) - z + f * scaling) / self.alpha_x
         dx = -self.alpha_x * x
         z += dz * dt
         y += z * dt
@@ -62,7 +69,8 @@ class DMP1D:
     
     def desired_velocity(self, y, z, x):
         f = self.forcing_term(x)
-        dz = self.alpha_z * (self.beta_z * (self.goal - y) - z + f * (self.goal - self.start)) / self.alpha_x
+        scaling = 1.0 
+        dz = self.alpha_z * (self.beta_z * (self.goal - y) - z + f * scaling) / self.alpha_x
         z += dz * 0.01
         return z
 

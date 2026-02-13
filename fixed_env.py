@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 from utils import  generate_trajectories_from_dmp_params
 from continuous_nav_envs import World, generate_random_positions
 from dmps import DMP1D,Simulation
-from plot_trajectories import generate_and_plot_trajectories_from_parameters
+from plot_trajectories import generate_and_plot_trajectories_from_parameters, plot_dmp_weight_space
+
 class GoalNet(nn.Module):
 
     def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.3):

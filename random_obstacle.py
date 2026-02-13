@@ -166,6 +166,11 @@ def generate_data(
                 torch.tensor(collision2, dtype=torch.float32)) for s_t, s_t_plus_one, final_position1,final_position2, dmp_params1,dmp_params2, collision1,collision2 in valid_data]
     return train_data, valid_data
 
+def list_split(lst, n):
+    """Split a list into n roughly equal parts without converting to numpy array."""
+    k, m = divmod(len(lst), n)
+    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+
 def train_predictive_net(training_sets,
                          valid_data,
                          net,
@@ -396,7 +401,8 @@ def train(train_data,
 
     stop_training, num_epochs_with_network = False, 0
 
-    training_sets = np.array_split(train_data, 10)
+    # Use the custom list_split function instead of np.array_split
+    training_sets = list_split(train_data, 10)
     # Loss function
     criterion = nn.MSELoss()
     criterion2 = nn.BCEWithLogitsLoss()
@@ -409,8 +415,16 @@ def train(train_data,
             # Training goal network
             net_goal.train()
             train_losses = []
-            samples_inverse_dynamics = train_data_epoch[
-                np.random.randint(0, len(train_data_epoch)-batch_size, size=num_samples_inverse_dynamics)]
+            
+            # Fix: Generate random indices and select samples properly
+            if num_samples_inverse_dynamics >= len(train_data_epoch):
+                # If requesting more samples than available, use all samples
+                samples_inverse_dynamics = train_data_epoch.copy()
+                random.shuffle(samples_inverse_dynamics)
+            else:
+                # Use random.sample to select unique samples without replacement
+                samples_inverse_dynamics = random.sample(train_data_epoch, num_samples_inverse_dynamics)
+            
             for _ in range(num_iterations_inverse_dynamics):
                 for i in range(0, len(samples_inverse_dynamics), batch_size):
                     batch = samples_inverse_dynamics[i:i+batch_size]
@@ -477,9 +491,8 @@ def train(train_data,
                     loss_subgoal = criterion(final_state_preds1[:, :2], target_subgoal)
                     return_distance = criterion(final_state_preds2[:, :2], batch_s_t[:,:2])
 
-                    if task == "home_run_explo":
-                        loss_goal = loss_goal2 +loss_goal1 +  0.25 * (
-                            loss_coll1 + loss_coll2) + 1 * (outside_circle1 + outside_circle2)
+                    if task == "final_goal":
+                        loss_goal = loss_goal2 
                             
                     elif task == "two_goals":
                         loss_goal = loss_goal2 +loss_goal1 +  0.25 * (
@@ -505,7 +518,7 @@ def train(train_data,
                         loss_goal = loss_goal2 + 0.25 * (
                             loss_coll1 + loss_coll2) + 1 * (outside_circle1 + outside_circle2)
                     else:
-                        raise ValueError("Invalid task value. Expected 'home_run_explo' or 'home_run_escape'.")
+                        raise ValueError("Invalid task value. Expected 'final_goal' or 'home_run_escape'.")
 
                     if epoch > num_explo_episodes:
                         loss_goal.backward()
@@ -578,10 +591,10 @@ def train(train_data,
                 if plot_trajectories:
                     generate_and_plot_trajectories_from_parameters(dmp_params1, dmp_params2, 3, batch_s_t[:,:2], world, world_bounds, n_basis=3, circular=True,plot_only_first=plot_only_first)
                     
-                if task == "home_run_explo":
+                if task == "final_goal":
                     loss1 = np.mean(np.abs(np.array(actual_final_position1) - np.array(target_goal1)))
                     loss2 = np.mean(np.abs(np.array(actual_final_position2) - np.array(target_goal2)))
-                    loss = np.max([1 - loss2,1-loss1])
+                    loss = np.max([1-loss1, 1 - loss2])
                 elif task == "max_distance":
                     loss = np.mean(np.linalg.norm(np.array(actual_final_position2) - np.array(batch_s_t[:,:2]),axis=1)) / (1.66)
                 elif task == "explore_and_return":
@@ -619,7 +632,9 @@ if __name__ == "__main__":
         complexity=1.0,
         varying_wall=True,
         full_state_space=True)
-    training_sets = np.array_split(train_data, 10)
+    
+    # Use the custom list_split function instead of np.array_split
+    training_sets = list_split(train_data, 10)
 
     # Initialize the network Level 1
     net = PredNet(input_size=2+2+2+6+5, hidden_size=64, output_size=3, dropout_rate=0.1)
@@ -657,7 +672,7 @@ if __name__ == "__main__":
     train_data,valid_data= generate_data(
         world,
         world_bounds,
-        number_of_trajectories=10000,
+        number_of_trajectories=600,
         orientation=None,
         complexity=0.5,
         varying_wall=False,
@@ -691,7 +706,7 @@ if __name__ == "__main__":
 
 
     # Training Phase
-    task = 'home_run_explo'
+    task = 'max_distance'  # 'final_goal', 'two_goals', 'home_run_no_wall', 'explore_obstacle', 'explore_and_return', 'max_distance', 'second_goal'
     net_goal = GoalNet(input_size=2, hidden_size=64, output_size=2+2+6, dropout_rate=0)
     net_preds = [copy.deepcopy(net), copy.deepcopy(net)]
     valid_losses, net_goal, net_preds = train(
@@ -703,14 +718,14 @@ if __name__ == "__main__":
         target_goal2 = [0.,0.85],
         task = task,
         fine_tune_pred_nets = False,
-        num_samples_inverse_dynamics = 10000,
+        num_samples_inverse_dynamics = 1000,
         num_iterations_inverse_dynamics = 1,
         bound_dmp_weights = 1.0,
         early_stopping_threshold = 1.0,
         learning_rate = 0.005,
         batch_size = 10,
-        num_epochs = 10,
-        plot_trajectories = True,
+        num_epochs = 100,
+        plot_trajectories = False,
         world = world,
         valid_batch_size=50)
-    
+
