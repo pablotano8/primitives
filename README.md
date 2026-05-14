@@ -87,13 +87,26 @@ A square world with a single fixed horizontal wall. Used for controlled comparis
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.10-3.12
 - PyTorch
 - NumPy
 - pymunk (2D physics)
 - MuJoCo + mujoco-py (for Ant experiments)
 - Stable-Baselines3 (for PPO/TD3 baselines)
 - Matplotlib
+
+Install the core dependencies with either pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+or Poetry:
+
+```bash
+poetry install
+poetry run python escaping_rat.py
+```
 
 ### Running Experiments
 

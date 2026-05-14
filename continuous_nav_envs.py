@@ -106,7 +106,7 @@ class CircularWorld:
                 min_distance_all_obs[i] = query_info.distance
 
             query_info = obstacle[1].segment_query(body.position, body.position + body.velocity)
-            if query_info.shape is not None:
+            if query_info is not None and query_info.shape is not None:
                 collision_detected_all_obs[i] = True
 
         self.space.remove(body)
@@ -249,7 +249,7 @@ class RandomRectangleWorld:
                 min_distance_all_obs[i] = query_info.distance
 
             query_info = obstacle[1].segment_query(body.position, body.position + body.velocity)
-            if query_info.shape is not None:
+            if query_info is not None and query_info.shape is not None:
                 collision_detected_all_obs[i] = True
 
         self.space.remove(body)
@@ -419,7 +419,7 @@ class World:
                 min_distance_all_obs[i] = query_info.distance
                 
             query_info = obstacle[1].segment_query(body.position, body.position + body.velocity)
-            if query_info.shape is not None:
+            if query_info is not None and query_info.shape is not None:
                 collision_detected_all_obs[i] = True
                 
         self.space.remove(body)

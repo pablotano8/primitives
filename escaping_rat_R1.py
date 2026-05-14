@@ -112,6 +112,171 @@ def create_data_without_edge_to_home(valid_data, target_position1=[0, -0.75], ta
 
 
 
+def _trajectory_near_edges(positions, edge_points, edge_radius):
+    for pt in positions:
+        for ep in edge_points:
+            if (pt[0] - ep[0]) ** 2 + (pt[1] - ep[1]) ** 2 <= edge_radius ** 2:
+                return True
+    return False
+
+
+def generate_edge_biased_data(
+        world,
+        world_bounds,
+        number_of_trajectories=10000,
+        complexity=1.5,
+        orientation=None,
+        full_state_space=True,
+        bias='high',
+        edge_points=((-0.6, 0.0), (0.6, 0.0)),
+        edge_radius=0.15,
+        max_attempts_multiplier=20,
+        return_trajectories=False):
+    """Generate two-primitive exploration data biased by trajectory proximity to the
+    wall edges at `edge_points`.
+
+    bias='high' -> keep only trajectories that pass within `edge_radius` of an edge.
+    bias='low'  -> keep only trajectories that never pass within `edge_radius` of an edge.
+    """
+    if bias not in ('high', 'low'):
+        raise ValueError("bias must be 'high' or 'low'")
+
+    data = []
+    trajectories = []
+    attempts = 0
+    max_attempts = number_of_trajectories * max_attempts_multiplier
+
+    while len(data) < number_of_trajectories and attempts < max_attempts:
+        attempts += 1
+        world.reset()
+
+        if attempts % 1000 == 0:
+            print(f'Edge-biased ({bias}): kept {len(data)}/{number_of_trajectories} after {attempts} attempts')
+
+        start_position, _ = generate_random_positions(world, world_bounds=world_bounds, orientation=orientation, circular=True)
+        _, goal_position1 = generate_random_positions(world, world_bounds=world_bounds, orientation=orientation)
+
+        if full_state_space:
+            wall_length = world.radius * 2 * world.wall_size
+            wall_shape = [(-wall_length / 2, -world.wall_thickness / 2), (wall_length / 2, -world.wall_thickness / 2),
+                          (wall_length / 2, world.wall_thickness / 2), (-wall_length / 2, world.wall_thickness / 2)]
+            if not world.wall_present:
+                distances_to_edges = np.array([2, 2, 2, 2])
+            else:
+                distances_to_edges = np.array([np.linalg.norm(start_position - np.array(point)) for point in wall_shape])
+
+        complexity_scaled = complexity * ((np.abs(start_position[0] - goal_position1[0]) + np.abs(start_position[1] - goal_position1[1])) / 2)
+        dmp_x1 = DMP1D(start=start_position[0], goal=goal_position1[0], n_basis=3, complexity=complexity_scaled)
+        dmp_y1 = DMP1D(start=start_position[1], goal=goal_position1[1], n_basis=3, complexity=complexity_scaled)
+
+        simulation = Simulation(world, dmp_x1, dmp_y1, start_position, T=1.0, dt=0.01)
+        positions1, velocities1, collision1, _, _ = simulation.run()
+
+        _, goal_position2 = generate_random_positions(world, world_bounds=world_bounds, orientation=orientation)
+        complexity_scaled = complexity * ((np.abs(positions1[-1][0] - goal_position2[0]) + np.abs(positions1[-1][1] - goal_position2[1])) / 2)
+        dmp_x2 = DMP1D(start=positions1[-1][0], goal=goal_position2[0], n_basis=3, complexity=complexity_scaled)
+        dmp_y2 = DMP1D(start=positions1[-1][1], goal=goal_position2[1], n_basis=3, complexity=complexity_scaled)
+
+        simulation = Simulation(world, dmp_x2, dmp_y2, positions1[-1], T=1.0, dt=0.01)
+        positions2, velocities2, collision2, _, _ = simulation.run()
+
+        near = (_trajectory_near_edges(positions1, edge_points, edge_radius)
+                or _trajectory_near_edges(positions2, edge_points, edge_radius))
+
+        if bias == 'high' and not near:
+            continue
+        if bias == 'low' and near:
+            continue
+
+        dmp_params1 = [dmp_x1.start, dmp_y1.start, dmp_x1.goal, dmp_y1.goal, *dmp_x1.weights, *dmp_y1.weights]
+        dmp_params2 = [dmp_x1.goal, dmp_y1.goal, dmp_x2.goal, dmp_y2.goal, *dmp_x2.weights, *dmp_y2.weights]
+        if full_state_space:
+            s_t = np.concatenate((positions1[0], np.array([world.wall_present * 1.0]), distances_to_edges))
+        else:
+            s_t = positions1[0]
+        if not world.wall_present:
+            collision1, collision2 = np.array([0.0]), np.array([0.0])
+
+        data.append((s_t, True, positions1[-1], positions2[-1], dmp_params1, dmp_params2, collision1 * 1, collision2 * 1))
+        if return_trajectories:
+            trajectories.append((np.array(positions1), np.array(positions2)))
+
+    if len(data) < number_of_trajectories:
+        print(f'Warning: only collected {len(data)}/{number_of_trajectories} edge-biased ({bias}) trajectories in {attempts} attempts.')
+
+    split_idx = int(len(data) * 0.9)
+    train_data = data[:split_idx]
+    valid_data = data[split_idx:]
+    random.shuffle(train_data)
+
+    train_data = [(torch.tensor(s_t, dtype=torch.float32),
+                   torch.tensor(s_t_plus_one, dtype=torch.float32),
+                   torch.tensor(final_position1, dtype=torch.float32),
+                   torch.tensor(final_position2, dtype=torch.float32),
+                   torch.tensor(dmp_params1, dtype=torch.float32),
+                   torch.tensor(dmp_params2, dtype=torch.float32),
+                   torch.tensor(collision1, dtype=torch.float32),
+                   torch.tensor(collision2, dtype=torch.float32))
+                  for s_t, s_t_plus_one, final_position1, final_position2, dmp_params1, dmp_params2, collision1, collision2 in train_data]
+
+    valid_data = [(torch.tensor(s_t, dtype=torch.float32),
+                   torch.tensor(s_t_plus_one, dtype=torch.float32),
+                   torch.tensor(final_position1, dtype=torch.float32),
+                   torch.tensor(final_position2, dtype=torch.float32),
+                   torch.tensor(dmp_params1, dtype=torch.float32),
+                   torch.tensor(dmp_params2, dtype=torch.float32),
+                   torch.tensor(collision1, dtype=torch.float32),
+                   torch.tensor(collision2, dtype=torch.float32))
+                  for s_t, s_t_plus_one, final_position1, final_position2, dmp_params1, dmp_params2, collision1, collision2 in valid_data]
+
+    if return_trajectories:
+        return train_data, valid_data, trajectories
+    return train_data, valid_data
+
+
+def plot_edge_biased_trajectories(
+        world,
+        trajectories,
+        edge_points=((-0.6, 0.0), (0.6, 0.0)),
+        edge_radius=0.15,
+        circular=True,
+        title=None,
+        max_trajectories=200):
+    """Plot exploratory trajectories collected by `generate_edge_biased_data`, in the
+    style of `plot_example_trajectories`. Each entry of `trajectories` is a tuple
+    (positions1, positions2) for the two-primitive rollout."""
+    plt.figure(figsize=(5, 4))
+    ax = plt.gca()
+
+    if circular:
+        theta = np.linspace(0, 2 * np.pi, 100)
+        plt.plot(world.radius * np.cos(theta), world.radius * np.sin(theta), 'k--')
+        plt.xlim([-world.radius - 0.1, world.radius + 0.1])
+        plt.ylim([-world.radius - 0.1, world.radius + 0.1])
+
+    if getattr(world, 'wall_present', False):
+        wall_length = world.radius * 2 * world.wall_size
+        wt = world.wall_thickness
+        rect = plt.Rectangle((-wall_length / 2, -wt / 2), wall_length, wt,
+                             facecolor='gray', edgecolor='black', alpha=0.6)
+        ax.add_patch(rect)
+
+    for ep in edge_points:
+        ax.add_patch(plt.Circle(ep, edge_radius, fill=False, color='red', linestyle=':', alpha=0.8))
+        ax.plot(ep[0], ep[1], 'rx', markersize=8)
+
+    n = min(len(trajectories), max_trajectories)
+    for positions1, positions2 in trajectories[:n]:
+        plt.plot(positions1[:, 0], positions1[:, 1], color='blue', alpha=0.1)
+        plt.plot(positions2[:, 0], positions2[:, 1], color='green', alpha=0.1)
+        plt.plot(positions1[0, 0], positions1[0, 1], 'o', color='black', markersize=2, alpha=0.4)
+
+    ax.set_aspect('equal')
+    if title is not None:
+        plt.title(title)
+    plt.show()
+
+
 def generate_initial_states(
         world,
         world_bounds,
@@ -939,6 +1104,45 @@ if __name__ == "__main__":
         varying_wall=False,
         full_state_space=True)
     escape_valid_data_without_wall = create_valid_data_subset(valid_data_without_wall,target_position=torch.tensor([0, -0.85]), distance_threshold=0.3)
+
+    # Collect Data during Exploration -- Edge-biased pipelines (R1 extra analysis)
+    # Test whether exploratory policies with high density near the wall edges at
+    # (-0.6, 0) and (0.6, 0) yield more "edge-directed" two-primitive escape policies
+    # than exploratory policies with low density near those edges.
+    edge_points = ((-0.6, 0.0), (0.6, 0.0))
+    edge_radius = 0.15
+
+    world_edge = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True, wall_size=0.6)
+    train_data_high_edge, valid_data_high_edge, traj_high_edge = generate_edge_biased_data(
+        world_edge,
+        world_bounds,
+        number_of_trajectories=1000,
+        complexity=1.5,
+        orientation=None,
+        full_state_space=True,
+        bias='high',
+        edge_points=edge_points,
+        edge_radius=edge_radius,
+        return_trajectories=True)
+
+    train_data_low_edge, valid_data_low_edge, traj_low_edge = generate_edge_biased_data(
+        world_edge,
+        world_bounds,
+        number_of_trajectories=1000,
+        complexity=1.5,
+        orientation=None,
+        full_state_space=True,
+        bias='low',
+        edge_points=edge_points,
+        edge_radius=edge_radius,
+        return_trajectories=True)
+
+    plot_edge_biased_trajectories(
+        world_edge, traj_high_edge, edge_points=edge_points, edge_radius=edge_radius,
+        circular=True, title='Exploration: high density near edges')
+    plot_edge_biased_trajectories(
+        world_edge, traj_low_edge, edge_points=edge_points, edge_radius=edge_radius,
+        circular=True, title='Exploration: low density near edges')
 
     # Exploration with second wall
     world = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True,wall_size=0.5,second_wall=True)

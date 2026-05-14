@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "composing-predictable-primitives"
+version = "0.1.0"
+description = "Experiments for composing predictable primitives for zero-shot learning."
+authors = ["Pablo Tano"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+numpy = ">=1.24"
+torch = ">=2.0"
+matplotlib = ">=3.7"
+scipy = ">=1.10"
+pymunk = ">=6.0"
+gym = ">=0.26"
+gymnasium = ">=0.29"
+stable-baselines3 = ">=2.0"
+pybullet = ">=3.2"
+pybullet-envs-gymnasium = ">=0.4"
+ipython = ">=8.0,<9"
+pyqt6 = "^6.11.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
