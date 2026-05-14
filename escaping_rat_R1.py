@@ -45,7 +45,99 @@ class GoalNet(nn.Module):
         x = self.dropout(x)
         x = self.fc(x)
         return x, hidden
-    
+
+
+class ParticleFilter:
+    """Particle filter over the 4 wall corner positions (8 scalars).
+
+    Corners are stored in canonical order [BL, BR, TR, TL] to match the
+    wall_shape construction at line ~294. The filter assumes a stationary
+    wall (no process noise on the dynamics), with a small Gaussian jitter
+    added on resampling to avoid particle degeneracy.
+    """
+
+    def __init__(self, n_particles=500, x_range=(-1.0, 1.0),
+                 y_range=(-0.25, 0.25), resample_jitter=0.01, seed=None):
+        self.n = n_particles
+        self.x_range = x_range
+        self.y_range = y_range
+        self.resample_jitter = resample_jitter
+        self.rng = np.random.default_rng(seed)
+
+        # Independent uniform prior per corner coordinate.
+        bl = np.stack([self.rng.uniform(x_range[0], 0.0, size=n_particles),
+                       self.rng.uniform(y_range[0], 0.0, size=n_particles)], axis=-1)
+        br = np.stack([self.rng.uniform(0.0, x_range[1], size=n_particles),
+                       self.rng.uniform(y_range[0], 0.0, size=n_particles)], axis=-1)
+        tr = np.stack([self.rng.uniform(0.0, x_range[1], size=n_particles),
+                       self.rng.uniform(0.0, y_range[1], size=n_particles)], axis=-1)
+        tl = np.stack([self.rng.uniform(x_range[0], 0.0, size=n_particles),
+                       self.rng.uniform(0.0, y_range[1], size=n_particles)], axis=-1)
+        # shape (n_particles, 4, 2) corners in BL, BR, TR, TL order
+        self.particles = np.stack([bl, br, tr, tl], axis=1)
+        self.log_weights = np.full(n_particles, -np.log(n_particles))
+
+    def sample(self, n):
+        """Draw n particles proportional to current weights. Returns (n, 4, 2)."""
+        w = np.exp(self.log_weights - np.max(self.log_weights))
+        w = w / w.sum()
+        idx = self.rng.choice(self.n, size=n, replace=True, p=w)
+        return self.particles[idx].copy()
+
+    def update(self, positions, observations, sigmas, max_useful_sigma=1.0):
+        """Update weights with a batch of (position, distance-observation, sigma) triples.
+
+        positions:    (B, 2) numpy float
+        observations: (B, 4) numpy float -- noisy distances to corners (BL, BR, TR, TL)
+        sigmas:       (B,)   numpy float -- per-observation noise std (one sigma per row)
+        max_useful_sigma: rows whose sigma exceeds this are dropped (likelihood would
+                          be flat across particles anyway -- skip the work).
+        """
+        if positions.shape[0] == 0:
+            return
+        keep = sigmas <= max_useful_sigma
+        if not keep.any():
+            return
+        positions = positions[keep]
+        observations = observations[keep]
+        sigmas = sigmas[keep]
+
+        # predicted distances per (batch, particle, corner): (B, N, 4)
+        diff = self.particles[None, :, :, :] - positions[:, None, None, :]
+        pred = np.linalg.norm(diff, axis=-1)
+        # log-likelihood per (batch, particle): sum over 4 corners of N(obs; pred, sigma^2)
+        sig2 = (sigmas ** 2)[:, None, None] + 1e-12
+        log_lik = -0.5 * ((observations[:, None, :] - pred) ** 2) / sig2
+        log_lik = log_lik.sum(axis=-1) - 0.5 * 4 * np.log(2 * np.pi * sig2[:, :, 0])
+        # accumulate across the batch (assume independence)
+        self.log_weights = self.log_weights + log_lik.sum(axis=0)
+        # numerical stability: keep max log-weight at 0
+        self.log_weights -= np.max(self.log_weights)
+
+        # ESS-based resampling
+        w = np.exp(self.log_weights)
+        w = w / w.sum()
+        ess = 1.0 / np.sum(w ** 2)
+        if ess < self.n / 2:
+            idx = self.rng.choice(self.n, size=self.n, replace=True, p=w)
+            self.particles = self.particles[idx]
+            # regularized resampling jitter
+            self.particles = self.particles + self.rng.normal(
+                0.0, self.resample_jitter, size=self.particles.shape)
+            self.log_weights = np.full(self.n, -np.log(self.n))
+
+    def summary(self, true_corners=None):
+        """Return weighted mean (4, 2), per-coord std (4, 2), ESS, and L2 to truth (or None)."""
+        w = np.exp(self.log_weights - np.max(self.log_weights))
+        w = w / w.sum()
+        mean = (w[:, None, None] * self.particles).sum(axis=0)
+        var = (w[:, None, None] * (self.particles - mean[None, :, :]) ** 2).sum(axis=0)
+        std = np.sqrt(var)
+        ess = 1.0 / np.sum(w ** 2)
+        l2 = None if true_corners is None else float(np.linalg.norm(mean - true_corners))
+        return {"mean": mean, "std": std, "ess": float(ess), "l2_to_truth": l2}
+
+
 def split_list(data, n_chunks):
     """Split a list into n approximately equal chunks."""
     chunk_size = len(data) // n_chunks
@@ -118,6 +210,128 @@ def _trajectory_near_edges(positions, edge_points, edge_radius):
             if (pt[0] - ep[0]) ** 2 + (pt[1] - ep[1]) ** 2 <= edge_radius ** 2:
                 return True
     return False
+
+
+def distance_to_wall(positions, true_corners):
+    """Euclidean distance from each position to the closest point on the wall AABB.
+
+    positions:    (B, 2) numpy float
+    true_corners: (4, 2) numpy float, in BL/BR/TR/TL order
+    Returns:      (B,)   numpy float
+    """
+    positions = np.atleast_2d(positions)
+    x_min, x_max = true_corners[:, 0].min(), true_corners[:, 0].max()
+    y_min, y_max = true_corners[:, 1].min(), true_corners[:, 1].max()
+    dx = np.maximum(0.0, np.maximum(x_min - positions[:, 0], positions[:, 0] - x_max))
+    dy = np.maximum(0.0, np.maximum(y_min - positions[:, 1], positions[:, 1] - y_max))
+    return np.sqrt(dx * dx + dy * dy)
+
+
+def observation_noise_std(positions, true_corners, sigma_min=0.002, beta=12.0,
+                          cutoff_distance=0.4):
+    """Position-dependent observation noise: tight near the wall, exploding far from it.
+
+    With the defaults (sigma_min=0.002, beta=12), useful observations are confined
+    to a narrow band around the wall: sigma is ~0.002 on the wall, ~0.022 at d=0.2,
+    ~0.81 at d=0.5, and effectively infinite past d=1. Combined with the cutoff,
+    observations from positions farther than `cutoff_distance` are returned with
+    a sentinel std so large that the likelihood is flat across particles -- the
+    filter ignores them. This reproduces the user's intent: the posterior should
+    only tighten when the agent has actually been close to the wall.
+    """
+    d = distance_to_wall(positions, true_corners)
+    sigma = sigma_min * np.exp(beta * d)
+    if cutoff_distance is not None:
+        sigma = np.where(d > cutoff_distance, 1e6, sigma)
+    return sigma
+
+
+def _pf_unit_check(verbose=True):
+    """Sanity check: feed observations from positions sweeping around the wall
+    (near, for triangulation) vs from a single far position (vanishing SNR).
+    Confirms noise schedule and filter behavior."""
+    true_corners = np.array([(-0.3, -0.05), (0.3, -0.05),
+                             (0.3, 0.05), (-0.3, 0.05)])
+
+    pf_near = ParticleFilter(n_particles=500, seed=0)
+    initial_std = pf_near.summary(true_corners)["std"].mean()
+    # Sweep positions around (and just outside) the wall; multiple vantage points
+    # are required to triangulate corners (a single position only constrains each
+    # corner to a circle).
+    rng = np.random.default_rng(0)
+    near_positions = np.stack([
+        rng.uniform(-0.5, 0.5, size=200),
+        rng.choice([-1, 1], size=200) * rng.uniform(0.06, 0.15, size=200),
+    ], axis=-1)
+    for p in near_positions:
+        p = p.reshape(1, 2)
+        sig = observation_noise_std(p, true_corners)
+        obs = noisy_distances_to_corners(p, true_corners, sig)
+        pf_near.update(p, obs, sig)
+    near_summary = pf_near.summary(true_corners)
+    if verbose:
+        print(f'[PF unit] near sweep: initial std={initial_std:.4g}, '
+              f'final std={near_summary["std"].mean():.4g}, '
+              f'L2={near_summary["l2_to_truth"]:.4g}')
+    assert near_summary["std"].mean() < initial_std / 3.0, (
+        f'PF should tighten with near-wall sweep: {near_summary["std"].mean()} vs initial {initial_std}')
+    assert near_summary["l2_to_truth"] < 0.15, (
+        f'PF mean should converge near truth with triangulation: L2={near_summary["l2_to_truth"]}')
+
+    pf_far = ParticleFilter(n_particles=500, seed=1)
+    far_pos = np.array([[0.0, 0.95]])  # near top of arena, very high sigma
+    for _ in range(200):
+        sig = observation_noise_std(far_pos, true_corners)
+        obs = noisy_distances_to_corners(far_pos, true_corners, sig)
+        pf_far.update(far_pos, obs, sig)
+    far_summary = pf_far.summary(true_corners)
+    if verbose:
+        print(f'[PF unit] far  pos sigma={float(observation_noise_std(far_pos, true_corners)):.4g}'
+              f', final std={far_summary["std"].mean():.4g}, L2={far_summary["l2_to_truth"]:.4g}')
+    # Far should barely tighten the posterior compared to near sweep.
+    assert far_summary["std"].mean() > 3.0 * near_summary["std"].mean(), (
+        'Far-from-wall observations should leave the posterior much broader than near')
+
+
+def plot_particle_posterior(pf, true_corners=None, title=None):
+    """Scatter all particle corner positions, overlaying the true corners."""
+    labels = ['BL', 'BR', 'TR', 'TL']
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    plt.figure(figsize=(6, 6))
+    for k in range(4):
+        pts = pf.particles[:, k, :]
+        plt.scatter(pts[:, 0], pts[:, 1], s=4, alpha=0.3,
+                    color=colors[k], label=f'particles {labels[k]}')
+        if true_corners is not None:
+            plt.scatter(true_corners[k, 0], true_corners[k, 1],
+                        s=120, marker='x', color=colors[k],
+                        label=f'true {labels[k]}')
+    circle = plt.Circle((0, 0), 1, fill=False, color='gray', linestyle='--')
+    plt.gca().add_patch(circle)
+    plt.gca().set_aspect('equal')
+    plt.xlim(-1.1, 1.1)
+    plt.ylim(-1.1, 1.1)
+    if title:
+        plt.title(title)
+    plt.legend(fontsize=7, loc='upper right', ncol=2)
+    plt.show()
+
+
+def noisy_distances_to_corners(positions, true_corners, sigmas, rng=None):
+    """Return noisy distances from each position to each of the 4 corners.
+
+    positions:    (B, 2)
+    true_corners: (4, 2)
+    sigmas:       (B,)
+    Returns:      (B, 4) clipped to >= 0
+    """
+    if rng is None:
+        rng = np.random
+    positions = np.atleast_2d(positions)
+    true_distances = np.linalg.norm(
+        positions[:, None, :] - true_corners[None, :, :], axis=-1)  # (B, 4)
+    noise = rng.normal(0.0, 1.0, size=true_distances.shape) * sigmas[:, None]
+    return np.maximum(0.0, true_distances + noise)
 
 
 def generate_edge_biased_data(
@@ -785,8 +999,11 @@ def train(train_data,
           valid_batch_size=50,
           plot_only_first=False,
           testing_dumb_model = False,
-          trip_wire = None):
-    
+          trip_wire = None,
+          pf=None,
+          true_corners=None,
+          pf_log_freq=1):
+
     # Optimizer
     optimizer_goal = optim.Adam(net_goal.parameters(), lr=learning_rate, weight_decay=0)
     optimizer_preds = [optim.Adam(net.parameters(), lr=learning_rate, weight_decay=0) for net in net_preds]
@@ -812,6 +1029,21 @@ def train(train_data,
                     batch = samples_inverse_dynamics[i:i+batch_size]
                     batch_s_t = torch.stack([item[0] for item in batch])
                     target_goal_batch = torch.stack([torch.tensor(target_goal2) for item in batch])
+
+                    # Bayesian wall-state estimator: sample first (using stale posterior),
+                    # then later update the filter with this batch's noisy observations.
+                    # Only the distance-to-corner features (cols 3..6) of batch_s_t are
+                    # replaced with samples drawn from the posterior; positions (cols 0..1)
+                    # and the wall_present flag (col 2) stay ground-truth.
+                    batch_s_t_pm = batch_s_t
+                    if pf is not None and true_corners is not None:
+                        batch_positions_np = batch_s_t[:, :2].detach().cpu().numpy().astype(np.float64)
+                        sampled_corners = pf.sample(batch_s_t.shape[0])  # (B, 4, 2)
+                        posterior_distances = np.linalg.norm(
+                            batch_positions_np[:, None, :] - sampled_corners, axis=-1)  # (B, 4)
+                        batch_s_t_pm = batch_s_t.clone()
+                        batch_s_t_pm[:, 3:7] = torch.tensor(
+                            posterior_distances, dtype=torch.float32)
 
                     # Prepare inputs for RNN
                     inputs1 = batch_s_t.unsqueeze(1)  # (batch_size, seq_len=1, input_size)
@@ -855,8 +1087,10 @@ def train(train_data,
                     dmp_params1 = torch.cat([dmp_params1_positions, dmp_params1_weights], dim=1)
                     dmp_params2 = torch.cat([dmp_params2_positions, dmp_params2_weights], dim=1)
 
-                    # Forward pass through net_preds to get final state predictions
-                    inputs1 = torch.cat((batch_s_t, dmp_params1), dim=1).unsqueeze(1)
+                    # Forward pass through net_preds to get final state predictions.
+                    # batch_s_t_pm has corner distances drawn from the posterior over
+                    # wall corners (matches batch_s_t when pf is None).
+                    inputs1 = torch.cat((batch_s_t_pm, dmp_params1), dim=1).unsqueeze(1)
                     outputs1, hidden = net_preds[0](inputs1)
                     final_state_preds1 = outputs1.squeeze(1)
 
@@ -923,7 +1157,18 @@ def train(train_data,
                     if epoch > num_explo_episodes:
                         loss_goal.backward()
                         optimizer_goal.step()
-            
+
+                    # Update the particle filter with this batch's noisy observations
+                    # AFTER PM has used the (stale) posterior for its forward pass.
+                    if pf is not None and true_corners is not None:
+                        valid_mask = (batch_s_t[:, 2] > 0.5).detach().cpu().numpy()
+                        if valid_mask.any():
+                            obs_positions = batch_positions_np[valid_mask]
+                            sigmas = observation_noise_std(obs_positions, true_corners)
+                            obs = noisy_distances_to_corners(
+                                obs_positions, true_corners, sigmas)
+                            pf.update(obs_positions, obs, sigmas)
+
             if fine_tune_pred_nets:
                 epsilon = 1 if epoch < num_explo_episodes else 0
                 for _ in range(1):
@@ -1008,10 +1253,20 @@ def train(train_data,
 
                 print(f'Epoch {epoch + 1}/{num_epochs}: Train Loss = {np.mean(train_losses, axis=0)} , Valid Loss = {valid_losses[-1]:.2f}')
 
+                if pf is not None and (epoch % pf_log_freq == 0):
+                    pf_summary = pf.summary(true_corners=true_corners)
+                    mean_std = float(pf_summary["std"].mean())
+                    l2 = pf_summary["l2_to_truth"]
+                    print(f'  [PF] ESS={pf_summary["ess"]:.1f}, mean per-coord std={mean_std:.4f}'
+                          + (f', L2(mean,truth)={l2:.4f}' if l2 is not None else ''))
+
     return valid_losses, net_goal, net_preds
 
 
 if __name__ == "__main__":
+
+    # Sanity-check the Bayesian wall estimator before any training.
+    _pf_unit_check()
 
     # Initialize the world
     world_bounds = [-1, 1, -1, 1]
@@ -1110,7 +1365,7 @@ if __name__ == "__main__":
     # (-0.6, 0) and (0.6, 0) yield more "edge-directed" two-primitive escape policies
     # than exploratory policies with low density near those edges.
     edge_points = ((-0.6, 0.0), (0.6, 0.0))
-    edge_radius = 0.15
+    edge_radius = 0.3
 
     world_edge = CircularWorld(num_obstacles=0, max_speed=100, radius=1, wall_present=True, wall_size=0.6)
     train_data_high_edge, valid_data_high_edge, traj_high_edge = generate_edge_biased_data(
@@ -1135,7 +1390,7 @@ if __name__ == "__main__":
         bias='low',
         edge_points=edge_points,
         edge_radius=edge_radius,
-        return_trajectories=True)
+        return_trajectories=True,)
 
     plot_edge_biased_trajectories(
         world_edge, traj_high_edge, edge_points=edge_points, edge_radius=edge_radius,
@@ -1191,9 +1446,23 @@ if __name__ == "__main__":
     task = 'home_run_explo'
     net_goal = GoalNet(input_size=2, hidden_size=64, output_size=2+2+6, dropout_rate=0.1)
     net_preds = [copy.deepcopy(net), copy.deepcopy(net)]
+
+    # The exploration data train_data_high_edge was generated on world_edge,
+    # so the agent's noisy observations should be consistent with that wall.
+    pf_world = world_edge
+    pf_wall_length = pf_world.radius * 2 * pf_world.wall_size
+    true_corners_train = np.array([
+        (-pf_wall_length / 2, -pf_world.wall_thickness / 2),
+        ( pf_wall_length / 2, -pf_world.wall_thickness / 2),
+        ( pf_wall_length / 2,  pf_world.wall_thickness / 2),
+        (-pf_wall_length / 2,  pf_world.wall_thickness / 2),
+    ])
+    pf = ParticleFilter(n_particles=500, x_range=(-1.0, 1.0),
+                        y_range=(-0.25, 0.25), seed=0)
+
     valid_losses, net_goal, net_preds = train(
-        train_data = train_data_with_wall,
-        valid_data = valid_data_with_wall,
+        train_data = train_data_low_edge,
+        valid_data = valid_data_low_edge,
         net_goal = net_goal,
         net_preds = net_preds,
         target_goal1 = [0.,0.85],
@@ -1210,7 +1479,13 @@ if __name__ == "__main__":
         plot_trajectories = True,
         world = world,
         valid_batch_size=5,
-        trip_wire=None)
+        trip_wire=None,
+        pf=pf,
+        true_corners=true_corners_train)
+
+    # Quick visualization of the posterior over wall corners after training.
+    plot_particle_posterior(pf, true_corners_train,
+                            title='Posterior over wall corners after Training Phase')
     
 
     # Testing Phase
