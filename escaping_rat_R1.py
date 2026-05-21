@@ -48,94 +48,136 @@ class GoalNet(nn.Module):
 
 
 class ParticleFilter:
-    """Particle filter over the 4 wall corner positions (8 scalars).
+    """Closed-form Gaussian posterior over (x_left, x_right).
 
-    Corners are stored in canonical order [BL, BR, TR, TL] to match the
-    wall_shape construction at line ~294. The filter assumes a stationary
-    wall (no process noise on the dynamics), with a small Gaussian jitter
-    added on resampling to avoid particle degeneracy.
+    Despite the legacy name, this is not a particle filter -- it's a pair of
+    independent univariate Gaussians updated by the standard conjugate
+    Gaussian formula. Each observation is a noisy direct reading of x_left
+    (or x_right) with noise std scaled by the agent's distance to that edge
+    segment. The posterior is exact, unbiased, and shrinks monotonically as
+    1/sqrt(N) with evidence -- no resampling, no degeneracy, no bias from
+    non-linear distance observations.
+
+    Wall thickness is known; the 4 corners are derived from (xL, xR) as
+        BL=(xL,-t/2)  BR=(xR,-t/2)  TR=(xR,+t/2)  TL=(xL,+t/2)
     """
 
-    def __init__(self, n_particles=500, x_range=(-1.0, 1.0),
-                 y_range=(-0.25, 0.25), resample_jitter=0.01, seed=None):
-        self.n = n_particles
-        self.x_range = x_range
-        self.y_range = y_range
-        self.resample_jitter = resample_jitter
-        self.rng = np.random.default_rng(seed)
+    def __init__(self, wall_thickness=0.2,
+                 xL_prior_mean=-0.5, xL_prior_std=0.3,
+                 xR_prior_mean=+0.5, xR_prior_std=0.3,
+                 sigma_min=0.05, slope=1.0,
+                 n_particles=500, seed=None,
+                 # legacy kwargs accepted for backwards compat
+                 x_left_range=None, x_right_range=None, resample_jitter=None):
+        if x_left_range is not None:
+            xL_prior_mean = 0.5 * (x_left_range[0] + x_left_range[1])
+            xL_prior_std = (x_left_range[1] - x_left_range[0]) / np.sqrt(12)
+        if x_right_range is not None:
+            xR_prior_mean = 0.5 * (x_right_range[0] + x_right_range[1])
+            xR_prior_std = (x_right_range[1] - x_right_range[0]) / np.sqrt(12)
 
-        # Independent uniform prior per corner coordinate.
-        bl = np.stack([self.rng.uniform(x_range[0], 0.0, size=n_particles),
-                       self.rng.uniform(y_range[0], 0.0, size=n_particles)], axis=-1)
-        br = np.stack([self.rng.uniform(0.0, x_range[1], size=n_particles),
-                       self.rng.uniform(y_range[0], 0.0, size=n_particles)], axis=-1)
-        tr = np.stack([self.rng.uniform(0.0, x_range[1], size=n_particles),
-                       self.rng.uniform(0.0, y_range[1], size=n_particles)], axis=-1)
-        tl = np.stack([self.rng.uniform(x_range[0], 0.0, size=n_particles),
-                       self.rng.uniform(0.0, y_range[1], size=n_particles)], axis=-1)
-        # shape (n_particles, 4, 2) corners in BL, BR, TR, TL order
-        self.particles = np.stack([bl, br, tr, tl], axis=1)
-        self.log_weights = np.full(n_particles, -np.log(n_particles))
+        self.wall_thickness = float(wall_thickness)
+        self.xL_mean = float(xL_prior_mean)
+        self.xL_var = float(xL_prior_std) ** 2
+        self.xR_mean = float(xR_prior_mean)
+        self.xR_var = float(xR_prior_std) ** 2
+        self.sigma_min = sigma_min
+        self.slope = slope
+        self.n_particles = n_particles   # only used for sample() / plotting
+        self.rng = np.random.default_rng(seed)
+        self.n_obs_applied = 0
+
+    def _sigma_to_edge(self, positions, x_edge):
+        """Per-position noise std for an observation of x_edge.
+        Distance is to the closest point on the vertical edge segment at x=x_edge."""
+        positions = np.atleast_2d(positions)
+        t2 = self.wall_thickness / 2
+        dx = positions[:, 0] - x_edge
+        dy = np.maximum(0.0, np.abs(positions[:, 1]) - t2)
+        d = np.sqrt(dx * dx + dy * dy)
+        return self.sigma_min + self.slope * d
+
+    def _corners_from_params(self, params):
+        """(..., 2) [xL, xR] -> (..., 4, 2) corners in BL, BR, TR, TL order."""
+        t2 = self.wall_thickness / 2
+        xL = params[..., 0]
+        xR = params[..., 1]
+        return np.stack([
+            np.stack([xL, np.full_like(xL, -t2)], axis=-1),
+            np.stack([xR, np.full_like(xR, -t2)], axis=-1),
+            np.stack([xR, np.full_like(xR,  t2)], axis=-1),
+            np.stack([xL, np.full_like(xL,  t2)], axis=-1),
+        ], axis=-2)
+
+    @property
+    def particles(self):
+        """N i.i.d. draws from the posterior, shape (N, 2). For plotting."""
+        return np.stack([
+            self.rng.normal(self.xL_mean, np.sqrt(self.xL_var), size=self.n_particles),
+            self.rng.normal(self.xR_mean, np.sqrt(self.xR_var), size=self.n_particles),
+        ], axis=-1)
+
+    @property
+    def log_weights(self):
+        """All draws equally weighted (closed-form posterior)."""
+        return np.zeros(self.n_particles)
 
     def sample(self, n):
-        """Draw n particles proportional to current weights. Returns (n, 4, 2)."""
-        w = np.exp(self.log_weights - np.max(self.log_weights))
-        w = w / w.sum()
-        idx = self.rng.choice(self.n, size=n, replace=True, p=w)
-        return self.particles[idx].copy()
+        """Draw n joint posterior samples and convert to 4-corner positions."""
+        params = np.stack([
+            self.rng.normal(self.xL_mean, np.sqrt(self.xL_var), size=n),
+            self.rng.normal(self.xR_mean, np.sqrt(self.xR_var), size=n),
+        ], axis=-1)
+        return self._corners_from_params(params)
 
-    def update(self, positions, observations, sigmas, max_useful_sigma=1.0):
-        """Update weights with a batch of (position, distance-observation, sigma) triples.
+    def update(self, positions, true_corners):
+        """Fold in a batch of noisy xL/xR observations from these positions.
 
-        positions:    (B, 2) numpy float
-        observations: (B, 4) numpy float -- noisy distances to corners (BL, BR, TR, TL)
-        sigmas:       (B,)   numpy float -- per-observation noise std (one sigma per row)
-        max_useful_sigma: rows whose sigma exceeds this are dropped (likelihood would
-                          be flat across particles anyway -- skip the work).
+        positions:    (B, 2) numpy float, agent positions
+        true_corners: (4, 2) numpy float, ground-truth corners -- only the
+                      min/max of column 0 (xL, xR) are used.
         """
+        positions = np.atleast_2d(positions)
         if positions.shape[0] == 0:
             return
-        keep = sigmas <= max_useful_sigma
-        if not keep.any():
-            return
-        positions = positions[keep]
-        observations = observations[keep]
-        sigmas = sigmas[keep]
+        true_xL = float(true_corners[:, 0].min())
+        true_xR = float(true_corners[:, 0].max())
 
-        # predicted distances per (batch, particle, corner): (B, N, 4)
-        diff = self.particles[None, :, :, :] - positions[:, None, None, :]
-        pred = np.linalg.norm(diff, axis=-1)
-        # log-likelihood per (batch, particle): sum over 4 corners of N(obs; pred, sigma^2)
-        sig2 = (sigmas ** 2)[:, None, None] + 1e-12
-        log_lik = -0.5 * ((observations[:, None, :] - pred) ** 2) / sig2
-        log_lik = log_lik.sum(axis=-1) - 0.5 * 4 * np.log(2 * np.pi * sig2[:, :, 0])
-        # accumulate across the batch (assume independence)
-        self.log_weights = self.log_weights + log_lik.sum(axis=0)
-        # numerical stability: keep max log-weight at 0
-        self.log_weights -= np.max(self.log_weights)
+        # generate noisy direct readings of xL and xR
+        sig_L = self._sigma_to_edge(positions, true_xL)
+        sig_R = self._sigma_to_edge(positions, true_xR)
+        obs_L = true_xL + self.rng.normal(0.0, sig_L)
+        obs_R = true_xR + self.rng.normal(0.0, sig_R)
 
-        # ESS-based resampling
-        w = np.exp(self.log_weights)
-        w = w / w.sum()
-        ess = 1.0 / np.sum(w ** 2)
-        if ess < self.n / 2:
-            idx = self.rng.choice(self.n, size=self.n, replace=True, p=w)
-            self.particles = self.particles[idx]
-            # regularized resampling jitter
-            self.particles = self.particles + self.rng.normal(
-                0.0, self.resample_jitter, size=self.particles.shape)
-            self.log_weights = np.full(self.n, -np.log(self.n))
+        # conjugate Gaussian update for xL (vectorized over the batch)
+        prec_obs_L = 1.0 / (sig_L ** 2)
+        new_prec_L = 1.0 / self.xL_var + prec_obs_L.sum()
+        self.xL_mean = (self.xL_mean / self.xL_var + (obs_L * prec_obs_L).sum()) / new_prec_L
+        self.xL_var = 1.0 / new_prec_L
+
+        prec_obs_R = 1.0 / (sig_R ** 2)
+        new_prec_R = 1.0 / self.xR_var + prec_obs_R.sum()
+        self.xR_mean = (self.xR_mean / self.xR_var + (obs_R * prec_obs_R).sum()) / new_prec_R
+        self.xR_var = 1.0 / new_prec_R
+
+        self.n_obs_applied += positions.shape[0]
 
     def summary(self, true_corners=None):
-        """Return weighted mean (4, 2), per-coord std (4, 2), ESS, and L2 to truth (or None)."""
-        w = np.exp(self.log_weights - np.max(self.log_weights))
-        w = w / w.sum()
-        mean = (w[:, None, None] * self.particles).sum(axis=0)
-        var = (w[:, None, None] * (self.particles - mean[None, :, :]) ** 2).sum(axis=0)
-        std = np.sqrt(var)
-        ess = 1.0 / np.sum(w ** 2)
-        l2 = None if true_corners is None else float(np.linalg.norm(mean - true_corners))
-        return {"mean": mean, "std": std, "ess": float(ess), "l2_to_truth": l2}
+        mean_params = np.array([self.xL_mean, self.xR_mean])
+        std_params = np.sqrt(np.array([self.xL_var, self.xR_var]))
+        t2 = self.wall_thickness / 2
+        mean_corners = np.array([
+            [self.xL_mean, -t2], [self.xR_mean, -t2],
+            [self.xR_mean,  t2], [self.xL_mean,  t2],
+        ])
+        l2 = None if true_corners is None else float(np.linalg.norm(mean_corners - true_corners))
+        return {
+            "mean_params": mean_params,
+            "std_params": std_params,
+            "mean_corners": mean_corners,
+            "ess": float(self.n_particles),
+            "l2_to_truth": l2,
+        }
 
 
 def split_list(data, n_chunks):
@@ -227,93 +269,132 @@ def distance_to_wall(positions, true_corners):
     return np.sqrt(dx * dx + dy * dy)
 
 
-def observation_noise_std(positions, true_corners, sigma_min=0.002, beta=12.0,
-                          cutoff_distance=0.4):
-    """Position-dependent observation noise: tight near the wall, exploding far from it.
+def observation_noise_std(positions, true_corners, sigma_min=0.03, slope=0.8):
+    """Per-corner observation noise: smooth, no hard cutoff.
 
-    With the defaults (sigma_min=0.002, beta=12), useful observations are confined
-    to a narrow band around the wall: sigma is ~0.002 on the wall, ~0.022 at d=0.2,
-    ~0.81 at d=0.5, and effectively infinite past d=1. Combined with the cutoff,
-    observations from positions farther than `cutoff_distance` are returned with
-    a sentinel std so large that the likelihood is flat across particles -- the
-    filter ignores them. This reproduces the user's intent: the posterior should
-    only tighten when the agent has actually been close to the wall.
+    Returns shape (B, 4): one sigma per (observation, corner). Sigma for corner
+    k grows LINEARLY with the agent's distance to corner k:
+
+        sigma_k = sigma_min + slope * d_to_corner_k
+
+    Defaults give sigma ~ 0.03 right at the corner, ~ 0.19 at d=0.2, ~ 0.43 at
+    d=0.5, ~ 0.83 at d=1.0. Smooth degradation of information with distance,
+    no binary cutoff -- distant observations contribute weakly but still
+    contribute, so posterior shrinkage is gradual as evidence accumulates.
     """
-    d = distance_to_wall(positions, true_corners)
-    sigma = sigma_min * np.exp(beta * d)
-    if cutoff_distance is not None:
-        sigma = np.where(d > cutoff_distance, 1e6, sigma)
-    return sigma
+    positions = np.atleast_2d(positions)
+    d = np.linalg.norm(positions[:, None, :] - true_corners[None, :, :], axis=-1)
+    return sigma_min + slope * d
 
 
 def _pf_unit_check(verbose=True):
-    """Sanity check: feed observations from positions sweeping around the wall
-    (near, for triangulation) vs from a single far position (vanishing SNR).
-    Confirms noise schedule and filter behavior."""
-    true_corners = np.array([(-0.3, -0.05), (0.3, -0.05),
-                             (0.3, 0.05), (-0.3, 0.05)])
+    """Sanity check the per-corner observation model.
 
-    pf_near = ParticleFilter(n_particles=500, seed=0)
-    initial_std = pf_near.summary(true_corners)["std"].mean()
-    # Sweep positions around (and just outside) the wall; multiple vantage points
-    # are required to triangulate corners (a single position only constrains each
-    # corner to a circle).
+    HIGH-edge proxy: positions cycle near each of the 4 corners -> all corners
+        should converge to truth.
+    LOW-edge proxy: positions stay over the wall middle (close to wall surface
+        but >cutoff_distance from any corner) -> posterior stays near prior.
+    """
+    true_corners = np.array([(-0.6, -0.1), (0.6, -0.1),
+                             (0.6, 0.1), (-0.6, 0.1)])
     rng = np.random.default_rng(0)
-    near_positions = np.stack([
-        rng.uniform(-0.5, 0.5, size=200),
-        rng.choice([-1, 1], size=200) * rng.uniform(0.06, 0.15, size=200),
-    ], axis=-1)
-    for p in near_positions:
-        p = p.reshape(1, 2)
-        sig = observation_noise_std(p, true_corners)
-        obs = noisy_distances_to_corners(p, true_corners, sig)
-        pf_near.update(p, obs, sig)
+
+    pf_near = ParticleFilter(n_particles=500, wall_thickness=0.2, seed=0)
+    initial_std = pf_near.summary(true_corners)["std_params"].mean()
+    # Cycle near each corner with a small random offset (within cutoff).
+    high_edge_positions = []
+    for _ in range(50):
+        for c in true_corners:
+            high_edge_positions.append(c + rng.uniform(-0.08, 0.08, size=2))
+    high_edge_positions = np.array(high_edge_positions)
+    pf_near.update(high_edge_positions, true_corners)
     near_summary = pf_near.summary(true_corners)
     if verbose:
-        print(f'[PF unit] near sweep: initial std={initial_std:.4g}, '
-              f'final std={near_summary["std"].mean():.4g}, '
-              f'L2={near_summary["l2_to_truth"]:.4g}')
-    assert near_summary["std"].mean() < initial_std / 3.0, (
-        f'PF should tighten with near-wall sweep: {near_summary["std"].mean()} vs initial {initial_std}')
-    assert near_summary["l2_to_truth"] < 0.15, (
-        f'PF mean should converge near truth with triangulation: L2={near_summary["l2_to_truth"]}')
+        print(f'[PF unit] high-edge sweep (near each corner): '
+              f'initial std_params={initial_std:.4g}, '
+              f'final mean_params={near_summary["mean_params"].round(3).tolist()}, '
+              f'std_params={near_summary["std_params"].round(4).tolist()}, '
+              f'L2(corners,truth)={near_summary["l2_to_truth"]:.4g}, '
+              f'obs applied={pf_near.n_obs_applied}')
+    assert near_summary["std_params"].mean() < initial_std / 3.0, (
+        f'PF should tighten when agent visits each corner: {near_summary["std_params"]} vs initial {initial_std}')
+    assert near_summary["l2_to_truth"] < 0.1, (
+        f'PF mean corners should converge to truth: L2={near_summary["l2_to_truth"]}')
 
-    pf_far = ParticleFilter(n_particles=500, seed=1)
-    far_pos = np.array([[0.0, 0.95]])  # near top of arena, very high sigma
-    for _ in range(200):
-        sig = observation_noise_std(far_pos, true_corners)
-        obs = noisy_distances_to_corners(far_pos, true_corners, sig)
-        pf_far.update(far_pos, obs, sig)
-    far_summary = pf_far.summary(true_corners)
+    # LOW-edge proxy: positions over the wall middle (close to wall surface,
+    # far from any lateral corner). Under the smooth noise model they still
+    # contribute, just much more weakly per observation.
+    n_low = len(high_edge_positions)  # match observation count
+    pf_low = ParticleFilter(n_particles=500, wall_thickness=0.2, seed=2)
+    low_edge_positions = np.stack([
+        rng.uniform(-0.3, 0.3, size=n_low),       # central x -- far from corners at x=+-0.6
+        rng.choice([-1, 1], size=n_low) * rng.uniform(0.0, 0.15, size=n_low),  # near wall surface
+    ], axis=-1)
+    pf_low.update(low_edge_positions, true_corners)
+    low_summary = pf_low.summary(true_corners)
     if verbose:
-        print(f'[PF unit] far  pos sigma={float(observation_noise_std(far_pos, true_corners)):.4g}'
-              f', final std={far_summary["std"].mean():.4g}, L2={far_summary["l2_to_truth"]:.4g}')
-    # Far should barely tighten the posterior compared to near sweep.
-    assert far_summary["std"].mean() > 3.0 * near_summary["std"].mean(), (
-        'Far-from-wall observations should leave the posterior much broader than near')
+        print(f'[PF unit] low-edge sweep (over wall middle): '
+              f'final std_params={low_summary["std_params"].round(4).tolist()}, '
+              f'L2(corners,truth)={low_summary["l2_to_truth"]:.4g}, '
+              f'obs applied={pf_low.n_obs_applied}')
+    # With the smooth noise model, low-edge observations DO contribute weakly
+    # (no hard cutoff). Posterior should be noticeably broader than high-edge
+    # for an equal number of observations -- per-obs information is much lower.
+    assert low_summary["std_params"].mean() > 1.5 * near_summary["std_params"].mean(), (
+        f'Low-edge regime should keep posterior broader than high-edge: '
+        f'low={low_summary["std_params"]} vs high={near_summary["std_params"]}')
 
 
 def plot_particle_posterior(pf, true_corners=None, title=None):
-    """Scatter all particle corner positions, overlaying the true corners."""
-    labels = ['BL', 'BR', 'TR', 'TL']
-    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-    plt.figure(figsize=(6, 6))
-    for k in range(4):
-        pts = pf.particles[:, k, :]
-        plt.scatter(pts[:, 0], pts[:, 1], s=4, alpha=0.3,
-                    color=colors[k], label=f'particles {labels[k]}')
-        if true_corners is not None:
-            plt.scatter(true_corners[k, 0], true_corners[k, 1],
-                        s=120, marker='x', color=colors[k],
-                        label=f'true {labels[k]}')
+    """Visualize the posterior over (x_left, x_right).
+
+    Two panels:
+      - left: scatter of particles in (x_left, x_right) space, with truth marked
+      - right: each particle drawn as a candidate wall rectangle (transparent),
+               with the true wall outlined in black.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    w = np.exp(pf.log_weights - np.max(pf.log_weights))
+    w = w / w.sum()
+    pts = pf.particles
+    ax = axes[0]
+    ax.scatter(pts[:, 0], pts[:, 1], s=8, alpha=0.4, c=w, cmap='viridis')
+    if true_corners is not None:
+        xL_true = true_corners[:, 0].min()
+        xR_true = true_corners[:, 0].max()
+        ax.scatter([xL_true], [xR_true], s=200, marker='x', color='red',
+                   linewidths=2.5, label=f'truth ({xL_true:.2f}, {xR_true:.2f})')
+        ax.legend(fontsize=8)
+    ax.set_xlabel('x_left'); ax.set_ylabel('x_right')
+    ax.set_xlim(-1.05, 0.05); ax.set_ylim(-0.05, 1.05)
+    ax.set_title('posterior over (x_left, x_right)')
+    ax.grid(alpha=0.3)
+
+    ax = axes[1]
+    t2 = pf.wall_thickness / 2
+    # subsample particles for plotting
+    idx = np.argsort(w)[-200:]
+    for i in idx:
+        xL, xR = pts[i]
+        ax.add_patch(plt.Rectangle((xL, -t2), xR - xL, pf.wall_thickness,
+                                   fill=True, alpha=0.02 + 0.3 * w[i] / w[idx].max(),
+                                   color='tab:blue', edgecolor=None))
+    if true_corners is not None:
+        xL_true = true_corners[:, 0].min()
+        xR_true = true_corners[:, 0].max()
+        ax.add_patch(plt.Rectangle((xL_true, -t2), xR_true - xL_true, pf.wall_thickness,
+                                   fill=False, edgecolor='red', linewidth=2,
+                                   label='true wall'))
+        ax.legend(fontsize=8)
     circle = plt.Circle((0, 0), 1, fill=False, color='gray', linestyle='--')
-    plt.gca().add_patch(circle)
-    plt.gca().set_aspect('equal')
-    plt.xlim(-1.1, 1.1)
-    plt.ylim(-1.1, 1.1)
+    ax.add_patch(circle)
+    ax.set_aspect('equal'); ax.set_xlim(-1.1, 1.1); ax.set_ylim(-1.1, 1.1)
+    ax.set_title('candidate walls (top 200 particles)')
+
     if title:
-        plt.title(title)
-    plt.legend(fontsize=7, loc='upper right', ncol=2)
+        fig.suptitle(title)
+    plt.tight_layout()
     plt.show()
 
 
@@ -322,16 +403,72 @@ def noisy_distances_to_corners(positions, true_corners, sigmas, rng=None):
 
     positions:    (B, 2)
     true_corners: (4, 2)
-    sigmas:       (B,)
+    sigmas:       (B, 4) per-corner noise std (or (B,) broadcast across corners)
     Returns:      (B, 4) clipped to >= 0
     """
     if rng is None:
         rng = np.random
     positions = np.atleast_2d(positions)
+    sigmas = np.asarray(sigmas)
+    if sigmas.ndim == 1:
+        sigmas = np.repeat(sigmas[:, None], 4, axis=1)
     true_distances = np.linalg.norm(
         positions[:, None, :] - true_corners[None, :, :], axis=-1)  # (B, 4)
-    noise = rng.normal(0.0, 1.0, size=true_distances.shape) * sigmas[:, None]
+    # don't draw on a sentinel sigma -- it can hit overflow and waste cycles
+    noise = rng.normal(0.0, 1.0, size=true_distances.shape) * np.minimum(sigmas, 1e3)
     return np.maximum(0.0, true_distances + noise)
+
+
+def random_exploration_waypoints(world, world_bounds, n_trajectories=1000,
+                                 complexity=1.5, waypoints_per_trajectory=5,
+                                 verbose=True):
+    """Simulate N random two-DMP trajectories and return subsampled waypoints.
+
+    Used to seed the wall-corner posterior BEFORE escape-policy training. Each
+    rollout produces ~200 raw timesteps, but adjacent timesteps are highly
+    correlated -- treating them as independent observations would massively
+    overcount evidence. We evenly subsample `waypoints_per_trajectory` points
+    from each of the two DMPs, so each rollout contributes ~2*K observations.
+    """
+    all_positions = []
+    for i in range(n_trajectories):
+        if verbose and i and i % 200 == 0:
+            print(f'random exploration: {i}/{n_trajectories}')
+        world.reset()
+        start_position, _ = generate_random_positions(
+            world, world_bounds=world_bounds, orientation=None, circular=True)
+        _, goal1 = generate_random_positions(world, world_bounds=world_bounds, orientation=None)
+        c1 = complexity * ((abs(start_position[0] - goal1[0]) + abs(start_position[1] - goal1[1])) / 2)
+        sim = Simulation(world,
+                         DMP1D(start=start_position[0], goal=goal1[0], n_basis=3, complexity=c1),
+                         DMP1D(start=start_position[1], goal=goal1[1], n_basis=3, complexity=c1),
+                         start_position, T=1.0, dt=0.01)
+        positions1, _, _, _, _ = sim.run()
+
+        _, goal2 = generate_random_positions(world, world_bounds=world_bounds, orientation=None)
+        c2 = complexity * ((abs(positions1[-1][0] - goal2[0]) + abs(positions1[-1][1] - goal2[1])) / 2)
+        sim = Simulation(world,
+                         DMP1D(start=positions1[-1][0], goal=goal2[0], n_basis=3, complexity=c2),
+                         DMP1D(start=positions1[-1][1], goal=goal2[1], n_basis=3, complexity=c2),
+                         positions1[-1], T=1.0, dt=0.01)
+        positions2, _, _, _, _ = sim.run()
+
+        for positions in (positions1, positions2):
+            arr = np.array(positions)
+            if waypoints_per_trajectory and len(arr) > waypoints_per_trajectory:
+                idx = np.linspace(0, len(arr) - 1, waypoints_per_trajectory).astype(int)
+                arr = arr[idx]
+            all_positions.append(arr)
+    return np.concatenate(all_positions, axis=0)
+
+
+def update_pf_from_exploration(pf, true_corners, waypoints, batch_size=10, shuffle=True):
+    """Stream `waypoints` through the PF in mini-batches, mutating its posterior."""
+    if shuffle:
+        order = np.random.permutation(len(waypoints))
+        waypoints = waypoints[order]
+    for i in range(0, len(waypoints), batch_size):
+        pf.update(waypoints[i:i + batch_size], true_corners)
 
 
 def generate_edge_biased_data(
@@ -1158,16 +1295,11 @@ def train(train_data,
                         loss_goal.backward()
                         optimizer_goal.step()
 
-                    # Update the particle filter with this batch's noisy observations
-                    # AFTER PM has used the (stale) posterior for its forward pass.
-                    if pf is not None and true_corners is not None:
-                        valid_mask = (batch_s_t[:, 2] > 0.5).detach().cpu().numpy()
-                        if valid_mask.any():
-                            obs_positions = batch_positions_np[valid_mask]
-                            sigmas = observation_noise_std(obs_positions, true_corners)
-                            obs = noisy_distances_to_corners(
-                                obs_positions, true_corners, sigmas)
-                            pf.update(obs_positions, obs, sigmas)
+                    # The PF posterior is FROZEN inside train(): wall-state
+                    # estimation happens entirely in a pre-training random
+                    # exploration phase. This isolates PM-learning performance
+                    # from state-estimation progress so we can study how PM
+                    # quality varies with the agent's prior wall-knowledge.
 
             if fine_tune_pred_nets:
                 epsilon = 1 if epoch < num_explo_episodes else 0
@@ -1255,10 +1387,12 @@ def train(train_data,
 
                 if pf is not None and (epoch % pf_log_freq == 0):
                     pf_summary = pf.summary(true_corners=true_corners)
-                    mean_std = float(pf_summary["std"].mean())
+                    mp = pf_summary["mean_params"]; sp = pf_summary["std_params"]
                     l2 = pf_summary["l2_to_truth"]
-                    print(f'  [PF] ESS={pf_summary["ess"]:.1f}, mean per-coord std={mean_std:.4f}'
-                          + (f', L2(mean,truth)={l2:.4f}' if l2 is not None else ''))
+                    print(f'  [PF] xL={mp[0]:+.3f}+-{sp[0]:.3f}, xR={mp[1]:+.3f}+-{sp[1]:.3f}, '
+                          f'ESS={pf_summary["ess"]:.1f}'
+                          + (f', L2(corners,truth)={l2:.4f}' if l2 is not None else '')
+                          + f', obs applied={pf.n_obs_applied}')
 
     return valid_losses, net_goal, net_preds
 
@@ -1457,8 +1591,27 @@ if __name__ == "__main__":
         ( pf_wall_length / 2,  pf_world.wall_thickness / 2),
         (-pf_wall_length / 2,  pf_world.wall_thickness / 2),
     ])
-    pf = ParticleFilter(n_particles=500, x_range=(-1.0, 1.0),
-                        y_range=(-0.25, 0.25), seed=0)
+    # The PF infers (x_left, x_right) only; wall thickness is given.
+    pf = ParticleFilter(n_particles=25, wall_thickness=pf_world.wall_thickness,
+                        x_left_range=(-1.0, 0.0), x_right_range=(0.0, 1.0), seed=0)
+
+    # Pre-training: random exploration to seed the wall-edge posterior. All
+    # state estimation happens here -- train() then runs with the PF frozen,
+    # so PM-learning performance can be studied as a function of how much
+    # prior wall-knowledge the agent had before escape-policy training. Vary
+    # n_trajectories to sweep over "degrees of pre-training learning".
+    print('Running random exploration to build the wall-edge posterior...')
+    explo_waypoints = random_exploration_waypoints(
+        pf_world, world_bounds, n_trajectories=5, complexity=1.5)
+    update_pf_from_exploration(pf, true_corners_train, explo_waypoints, batch_size=10)
+    pf_summary = pf.summary(true_corners=true_corners_train)
+    print(f'Posterior after random exploration: '
+          f'xL={pf_summary["mean_params"][0]:+.3f}+-{pf_summary["std_params"][0]:.4f}, '
+          f'xR={pf_summary["mean_params"][1]:+.3f}+-{pf_summary["std_params"][1]:.4f}, '
+          f'obs applied={pf.n_obs_applied}, '
+          f'L2(corners,truth)={pf_summary["l2_to_truth"]:.4f}')
+    plot_particle_posterior(pf, true_corners_train,
+                            title='Posterior after random exploration (pre-train)')
 
     valid_losses, net_goal, net_preds = train(
         train_data = train_data_low_edge,
@@ -1469,7 +1622,7 @@ if __name__ == "__main__":
         target_goal2 = [0.,0.85],
         task = task,
         fine_tune_pred_nets = False,
-        num_samples_inverse_dynamics = 10000,
+        num_samples_inverse_dynamics = 1000,
         num_iterations_inverse_dynamics = 1,
         bound_dmp_weights = 1.5,
         early_stopping_threshold = 1.0,
@@ -1484,8 +1637,10 @@ if __name__ == "__main__":
         true_corners=true_corners_train)
 
     # Quick visualization of the posterior over wall corners after training.
+    # Should look near-prior (broad blobs) -- low-edge trajectories provide
+    # very few observations within the cutoff distance of the wall.
     plot_particle_posterior(pf, true_corners_train,
-                            title='Posterior over wall corners after Training Phase')
+                            title='Posterior over wall corners after Training Phase (low-edge)')
     
 
     # Testing Phase
